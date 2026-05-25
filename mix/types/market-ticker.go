@@ -35,8 +35,14 @@ type MarketTicker struct {
 	IndexPrice decimal.Decimal
 	// AskPrice — best ask on the order book at fetch time.
 	AskPrice decimal.Decimal
+	// AskSize — size resting at AskPrice. 0 when Bitget did not
+	// populate the field (some pre-launch contracts).
+	AskSize decimal.Decimal
 	// BidPrice — best bid on the order book at fetch time.
 	BidPrice decimal.Decimal
+	// BidSize — size resting at BidPrice. 0 when Bitget did not
+	// populate the field.
+	BidSize decimal.Decimal
 	// FundingRate — most recent settled funding rate (next-period rate
 	// is published separately by /current-fund-rate; M1 ships only the
 	// one returned by the ticker endpoint).

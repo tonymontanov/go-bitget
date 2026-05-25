@@ -584,14 +584,19 @@ type orderbookFrame struct {
 }
 
 // tickerFrame mirrors one element of the "ticker" channel data array.
-// Field names follow the Bitget V2 wire (camelCase).
+// Field names follow the Bitget V2 wire (camelCase). The WS shape is
+// strictly a superset of the REST /ticker response: the streaming
+// envelope ALSO carries bidSz / askSz next to bidPr / askPr — REST
+// does not.
 type tickerFrame struct {
 	InstID            string `json:"instId"`
 	Last              string `json:"lastPr"`
 	MarkPrice         string `json:"markPrice"`
 	IndexPrice        string `json:"indexPrice"`
 	AskPr             string `json:"askPr"`
+	AskSz             string `json:"askSz"`
 	BidPr             string `json:"bidPr"`
+	BidSz             string `json:"bidSz"`
 	FundingRate       string `json:"fundingRate"`
 	NextFundingTimeMs string `json:"nextFundingTime"`
 	Ts                string `json:"ts"`
@@ -667,8 +672,12 @@ func convertTickerFrame(symbol string, t tickerFrame) mixtypes.MarketTicker {
 	index, _ = parseDecimalOrZero(t.IndexPrice)
 	var ask decimal.Decimal
 	ask, _ = parseDecimalOrZero(t.AskPr)
+	var askSz decimal.Decimal
+	askSz, _ = parseDecimalOrZero(t.AskSz)
 	var bid decimal.Decimal
 	bid, _ = parseDecimalOrZero(t.BidPr)
+	var bidSz decimal.Decimal
+	bidSz, _ = parseDecimalOrZero(t.BidSz)
 	var funding decimal.Decimal
 	funding, _ = parseDecimalOrZero(t.FundingRate)
 	var nextFundingMs int64
@@ -681,7 +690,9 @@ func convertTickerFrame(symbol string, t tickerFrame) mixtypes.MarketTicker {
 		MarkPrice:         mark,
 		IndexPrice:        index,
 		AskPrice:          ask,
+		AskSize:           askSz,
 		BidPrice:          bid,
+		BidSize:           bidSz,
 		FundingRate:       funding,
 		NextFundingTimeMs: nextFundingMs,
 		TsMs:              tsMs,

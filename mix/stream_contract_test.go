@@ -436,7 +436,9 @@ func TestContract_WatchTicker_FieldMapping(t *testing.T) {
 			"markPrice":       "50000.0",
 			"indexPrice":      "49999.0",
 			"askPr":           "50001",
+			"askSz":           "0.7",
 			"bidPr":           "49999.5",
+			"bidSz":           "1.2",
 			"fundingRate":     "0.0001",
 			"nextFundingTime": "1700000010000",
 			"ts":              "1700000000000",
@@ -459,8 +461,14 @@ func TestContract_WatchTicker_FieldMapping(t *testing.T) {
 		if tk.AskPrice.String() != "50001" {
 			t.Fatalf("ask = %s", tk.AskPrice.String())
 		}
+		if tk.AskSize.String() != "0.7" {
+			t.Fatalf("askSz = %s", tk.AskSize.String())
+		}
 		if tk.BidPrice.String() != "49999.5" {
 			t.Fatalf("bid = %s", tk.BidPrice.String())
+		}
+		if tk.BidSize.String() != "1.2" {
+			t.Fatalf("bidSz = %s", tk.BidSize.String())
 		}
 		if tk.FundingRate.String() != "0.0001" {
 			t.Fatalf("funding = %s", tk.FundingRate.String())
