@@ -182,9 +182,11 @@ func TestDoSuccessPost(t *testing.T) {
 }
 
 func TestDoExchangeRejection(t *testing.T) {
+	// 40768 is the canonical V2 contract code for "Order does not exist"
+	// (40037 means "Apikey does not exist" — see internal/bgerr/codes.go).
 	var srv *httptest.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"code":"40037","msg":"order does not exist","data":null,"requestTime":1}`))
+		_, _ = w.Write([]byte(`{"code":"40768","msg":"order does not exist","data":null,"requestTime":1}`))
 	}))
 	defer srv.Close()
 
@@ -205,7 +207,7 @@ func TestDoExchangeRejection(t *testing.T) {
 	if !asBgErr(err, &be) {
 		t.Fatalf("not *bgerr.Error: %T", err)
 	}
-	if be.BitgetCode != "40037" {
+	if be.BitgetCode != "40768" {
 		t.Fatalf("BitgetCode = %q", be.BitgetCode)
 	}
 }
