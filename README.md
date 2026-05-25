@@ -20,8 +20,8 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | M0 internal/bgerr (`Error` / `Kind` / `MapBitgetCode` / `MapHTTPStatus`) | done | table-driven tests |
 | M0 internal/rest (Bitget envelope `{code,msg,data,requestTime}`, `ACCESS-*` headers, observers) | done | httptest-based tests for GET / POST / 4xx / 5xx / ctx-cancel |
 | M0 internal/ws (Conn, login, plain-text ping, reconnect+jitter, resubscribe, dispatch) | done | mock-server tests for public / private / reconnect / pre-Start subscribe |
-| **M1** `mix/` REST core + market-data | done | `client.Mix()` factory, MIX `MarketDataClient` (GetSymbolInfo / GetOrderBook / GetMarketTicker / GetHistoricalCandles + 1m shortcut). Trading / Account / Stream methods are signature-stable stubs; full implementations in M2-M5. |
-| **M2** `mix/trading.go` (REST trading) | pending | CreateOrder / ModifyOrder / CancelOrder + batch (place / modify / cancel) + CancelAllOrders + CancelForgottenOrders, with client-side validation, ID mapping cache and per-symbol RateLimitEvent metadata |
+| **M1** `mix/` REST core + market-data | done | `client.Mix()` factory, MIX `MarketDataClient` (GetSymbolInfo / GetOrderBook / GetMarketTicker / GetHistoricalCandles + 1m shortcut). |
+| **M2** `mix/trading.go` (REST trading) | done | CreateOrder / ModifyOrder / CancelOrder + batch (place / modify / cancel, ≤50 rows) + CancelAllOrders (global, by productType+marginCoin). Client-side validation (size>0, price>0 on limit, identifier required on modify/cancel), per-row clientOid pairing in batches, RateLimitEvent meta filled with category + OrderCount. `mix.Client` now takes a `ClientSettings{ProductType, MarginMode, MarginCoin}` triple at construction. |
 | **M3** `mix/account.go` (REST account) | pending | GetAccount / GetPosition / GetOpenOrders / GetOrderDetail / ClosePosition / SetLeverage / SetPositionMode |
 | **M4** `mix/stream.go` (public WS + order-book engine) | pending | `books` channel snapshot+delta with CRC32 validation, `ticker` / `trade` / `candle{tf}`; gap detection + resync |
 | **M5** `mix/stream-private.go` (private WS) | pending | login + WatchOrders / WatchPositions / WatchAccount; auto-reconnect carries subscriptions |
@@ -51,8 +51,9 @@ if err != nil {
 }
 defer client.Close()
 
-// USDT-margined perpetuals (default). Use mix.NewClientWithProductType
-// to target USDC- or coin-margined contracts instead.
+// USDT-margined perpetuals + crossed margin + USDT margin coin (the
+// SDK defaults). Use mix.NewClientWithSettings to override any of
+// the three knobs (e.g. isolated margin or USDC-FUTURES).
 mc := client.Mix().(*mix.Client)
 
 // REST market data — production-ready in M1.
@@ -62,9 +63,28 @@ tk,   _ := mc.MarketData().GetMarketTicker(ctx, "BTCUSDT")
 candles, _ := mc.MarketData().GetHistoricalCandles(ctx, "BTCUSDT",
     roottypes.Timeframe1m, 100)
 
-// REST trading / account and WebSocket subscriptions are stubs in M1
-// — calling them returns ErrorKindInvalidRequest with "not implemented
-// yet (M2/M3/M4/M5)" until the corresponding milestone lands.
+// REST trading — production-ready in M2.
+import "github.com/shopspring/decimal"
+import mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
+
+placed, _ := mc.Trading().CreateOrder(ctx, mixtypes.CreateOrderRequest{
+    Symbol:        "BTCUSDT",
+    Side:          roottypes.SideTypeBuy,
+    OrderType:     roottypes.OrderTypeLimit,
+    TimeInForce:   roottypes.TimeInForcePostOnly,
+    Quantity:      decimal.RequireFromString("0.001"),
+    Price:         decimal.RequireFromString("43500.5"),
+    ClientOrderID: "core-uuid-1",
+})
+
+_ = mc.Trading().CancelOrder(ctx, roottypes.CancelOrderRequest{
+    Symbol:  "BTCUSDT",
+    OrderID: placed.OrderID,
+})
+
+// REST account and WebSocket subscriptions are stubs until M3 / M4 / M5
+// land — calling them returns ErrorKindInvalidRequest with "not
+// implemented yet (Mx)".
 ```
 
 End-to-end runnable demos will live under `examples/` (marketdata,
@@ -106,7 +126,7 @@ go-bitget/
   mix/                    # v1.0 — MIX (USDT-margined perps)
                           #   client.go         — *mix.Client + RegisterMixFactory init
                           #   market.go         — REST market-data (M1, done)
-                          #   trading.go        — REST trading (M2 stubs)
+                          #   trading.go        — REST trading (M2, done)
                           #   account.go        — REST account/position (M3 stubs)
                           #   stream.go         — public WS (M4 stubs)
                           #   stream-private.go — private WS (M5 stubs)

@@ -8,16 +8,23 @@ hand-derived from the public Bitget V2 documentation
 (https://www.bitget.com/api-doc/contract/...) and trimmed to the
 fields the SDK consumes.
 
-Coverage (M1):
+Coverage:
 
+M1 — market data:
   - GetSymbolInfo         : /api/v2/mix/market/contracts (happy + 404)
   - GetOrderBook          : /api/v2/mix/market/merge-depth (happy + depth clamp)
   - GetMarketTicker       : /api/v2/mix/market/ticker
   - GetHistoricalCandles  : /api/v2/mix/market/candles (preserves ASC order)
 
-Tests use a local httptest.Server; no network calls are made. Trading
-and account stubs are exercised separately to confirm they fail with
-the expected ErrorKindInvalidRequest.
+M2 — trading (lives in trading_contract_test.go):
+  - CreateOrder / ModifyOrder / CancelOrder
+  - CreateBatchOrders / ModifyBatchOrders / CancelBatchOrders
+  - CancelAllOrders (global) + per-symbol rejection
+
+Tests use a local httptest.Server; no network calls are made. Account
+stubs and Stream stubs are exercised separately to confirm they fail
+with the expected ErrorKindInvalidRequest until the relevant
+milestones (M3 / M4 / M5) wire them up.
 */
 
 package mix
@@ -499,10 +506,15 @@ func TestContract_GetHistoricalCandles1m_DefaultLength(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Trading / Account / Stream — stubs.
+// Trading (validation) / Account (stub) / Stream (stub).
+//
+// Trading methods are real (M2) but the calls below pass a zero-value
+// request, which triggers fail-fast client-side validation BEFORE any
+// HTTP. So the assertion remains the same — ErrorKindInvalidRequest —
+// just for a different reason.
 // ---------------------------------------------------------------------
 
-func TestStubs_ReturnInvalidRequest(t *testing.T) {
+func TestStubsAndValidation_ReturnInvalidRequest(t *testing.T) {
 	t.Parallel()
 
 	var client *bitget.Client
