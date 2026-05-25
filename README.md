@@ -5,8 +5,8 @@ HFT / algorithmic trading.
 
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
-Latest stable: **v1.0.0-dev** — under active development. See the table
-below for the current state of each milestone.
+Latest stable: **v1.0.0** — production-ready MIX (USDT-margined perps).
+See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
 
@@ -17,7 +17,7 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | --- | --- | --- |
 | **M0** scaffolding (root client, config, errors, logger, metrics, rate-limit event) | done | unit tests for codec / signer / error mapping / REST transport / WS protocol |
 | M0 internal/auth (HMAC-SHA256 base64 for REST + WS) | done | property tests + composition tests covering each axis of the pre-hash |
-| M0 internal/bgerr (`Error` / `Kind` / `MapBitgetCode` / `MapHTTPStatus`) | done | table-driven tests |
+| M0 internal/bgerr (`Error` / `Kind` / `MapBitgetCode` / `MapHTTPStatus`) | done | table-driven tests; ~115 V2 codes mapped across Auth/Invalid/RateLimit/Network/Exchange |
 | M0 internal/rest (Bitget envelope `{code,msg,data,requestTime}`, `ACCESS-*` headers, observers) | done | httptest-based tests for GET / POST / 4xx / 5xx / ctx-cancel |
 | M0 internal/ws (Conn, login, plain-text ping, reconnect+jitter, resubscribe, dispatch) | done | mock-server tests for public / private / reconnect / pre-Start subscribe |
 | **M1** `mix/` REST core + market-data | done | `client.Mix()` factory, MIX `MarketDataClient` (GetSymbolInfo / GetOrderBook / GetMarketTicker / GetHistoricalCandles + 1m shortcut). |
@@ -25,7 +25,7 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | **M3** `mix/account.go` (REST account) | done | GetAccount (`/accounts`, filtered by pinned marginCoin) / GetPosition (`/single-position`, zero-row filter, single non-empty leg) / GetOpenOrders (`/orders-pending`, internal cursor pagination via `idLessThan`, hard ceiling 10 pages × 100 orders) / GetOrderDetail (`/detail`, dispatches by orderId xor clientOid) / ClosePosition (`/close-positions`, market close in one-way mode; per-row failure → typed exchange error) / SetLeverage (`/set-leverage`, one-way mode) / SetPositionMode (`/set-position-mode`, account-global). |
 | **M4** `mix/stream.go` (public WS + order-book engine) | done | WatchOrderbook (`books` channel: full-depth snapshot + incremental deltas, top-25 CRC32 validation, dirty-on-mismatch + auto-resubscribe round-trip), WatchTicker, WatchTrades (per-tick fan-out), WatchKline (`candle{tf}`); shared lazy-init public `*ws.Conn` multiplexes every channel; per-Watch ctx scopes the subscription, not the connection. |
 | **M5** `mix/stream-private.go` (private WS) | done | WatchOrders / WatchPositions / WatchAccount on a lazily-dialed signed `*ws.Conn`; per-row fan-out so the caller handler is invoked once per state change; auth pre-flight returns `ErrorKindAuth` when the signer has no credentials. |
-| **v1.0 release** | pending | error code coverage extended to MIX-specific codes, `examples/` for marketdata + signed trade + WS orderbook |
+| **v1.0 release** | done | extended error-code coverage (~115 V2 codes); runnable `examples/` (marketdata, place-order, private-stream); `CHANGELOG.md`. |
 | **v2.0** `spot/` profile | pending | Trading / Account / MarketData / Stream mirroring `mix/` |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
@@ -136,9 +136,16 @@ _ = mc.Stream().WatchAccount(streamCtx,
 )
 ```
 
-End-to-end runnable demos will live under `examples/` (marketdata,
-signed trade, WS orderbook) once the corresponding milestones land
-(M2 trading, M4 public WS, M5 private WS).
+End-to-end runnable demos live under [`examples/`](./examples):
+
+- [`examples/marketdata`](./examples/marketdata) — public REST + WS
+  orderbook (no creds).
+- [`examples/place-order`](./examples/place-order) — signed REST: place
+  a post-only LIMIT 5 % below ask, inspect, then cancel.
+- [`examples/private-stream`](./examples/private-stream) — signed WS:
+  subscribe to orders / positions / account for a symbol.
+
+Run with `go run ./examples/<name>`.
 
 ## Dependencies
 
@@ -184,7 +191,10 @@ go-bitget/
                           #   contract_test.go  — JSON-fixture parser tests
   spot/                   # v2.0 — Bitget spot category (planned)
   uta/                    # v2.5 — Unified Trading Account (planned)
-  examples/               # runnable end-to-end demos (planned)
+  examples/               # runnable end-to-end demos (v1.0)
+                          #   marketdata/      — public REST + WS book
+                          #   place-order/     — signed REST trade
+                          #   private-stream/  — signed WS streams
 ```
 
 ## Architecture (brief)
@@ -211,16 +221,17 @@ if bitget.IsAuth(err)       { /* terminate */ }
 ```
 
 The Bitget code is preserved in `Error.BitgetCode` for debugging.
-Selected mapping (see `internal/bgerr/codes.go` for the full table):
+v1.0 maps **~115 V2 codes**; selected highlights below (see
+[`internal/bgerr/codes.go`](./internal/bgerr/codes.go) for the full
+table):
 
-| Bitget code | Kind | Notes |
-| --- | --- | --- |
-| `40001` / `40002` / `40003` / `40005` / `40006` / `40009` / `40011` / `40012` / `40018` | Auth | apikey/secret/passphrase/signature/timestamp/IP-whitelist |
-| `40007` / `40017` / `40021` / `40034` / `40037` / `43011` / `45110` / `45117` | InvalidRequest | content-type, params, symbol, order-not-found, qty/price step |
-| `40029` / `47001` | RateLimit | IP / UID rate limit |
-| `40010` / `40015` / `40725` | Network | transient timeouts / server-side hiccup |
-| `40754` / `50067` | Exchange | insufficient position quantity / balance |
-| anything else | Exchange | preserved verbatim in `Error.BitgetCode` |
+| Family | Bitget codes | Kind | Notes |
+| --- | --- | --- | --- |
+| Auth — credentials / IP / signature | `40001`-`40009` (sig fields), `40011`-`40014` (passphrase / status / perms), `40018` / `40038` (IP whitelist), `40022`-`40026` (account state), `40036` (passphrase error), `40037` (apikey not found), `40040` / `40041` (perm setup) | Auth | terminate; never retry |
+| InvalidRequest — params / lifecycle / risk | `40007` / `40017` / `40034` (params), `22001` / `22002` (no-op cancel/close), `40768` (order not exist), `40923` (amend no-change), `40939` (reduce-only conflict), `40920` (position-mode lock), `45034` (clientOid duplicate), `45035` (price step), `45044`-`45045` / `45054` (leverage), `45055`-`45057` (cancel state), `45110`-`45120` (qty/price/value caps) | InvalidRequest | fix request before retry |
+| RateLimit | `40029`, `45129` (cancel too frequent), `47001`, `59044` | RateLimit | back off |
+| Network — transient | `40010` / `40015`, `40200` (server upgrade), `40725` (service error), `40908`-`40910` (concurrent ops), `45043` (settlement), `50031` (system error), `50066` (position closing) | Network | retryable with backoff |
+| Exchange — business rejection | `40754`-`40758` (balance/position locks), `40798`-`40800` (margin/contract balance), `43012` (insufficient balance), `45002`-`45009` (asset/position/risk), `50020` / `50067` | Exchange | desk decides |
 
 ## Rate-limit observer
 
