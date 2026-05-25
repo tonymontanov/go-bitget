@@ -18,9 +18,17 @@ package mix
 import (
 	"context"
 
+	bitget "github.com/tonymontanov/go-bitget/v2"
 	mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
 )
+
+// errNotImplementedStream — sentinel for stream methods that are not
+// yet wired (M5).
+func errNotImplementedStream(method, milestone string) error {
+	return bitget.NewError(bitget.ErrorKindInvalidRequest, "",
+		"mix.Stream."+method+": not implemented yet ("+milestone+")", nil)
+}
 
 // WatchOrders — placeholder (M5).
 func (s *StreamClient) WatchOrders(

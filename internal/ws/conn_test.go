@@ -46,6 +46,11 @@ type mockServer struct {
 	subs   chan SubscriptionArg
 	logins chan struct{}
 	conns  chan *websocket.Conn
+	// writeMu serialises every write on every captured *websocket.Conn.
+	// gorilla/websocket forbids concurrent writes; tests that inject
+	// push frames from the test goroutine must take the same lock the
+	// handle() goroutine uses for ack writes.
+	writeMu sync.Mutex
 }
 
 func newMockServer(t *testing.T) *mockServer {
@@ -104,7 +109,9 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 		switch op.Op {
 		case "login":
 			m.logins <- struct{}{}
+			m.writeMu.Lock()
 			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"login","code":"0"}`))
+			m.writeMu.Unlock()
 		case "subscribe":
 			var i int
 			for i = 0; i < len(op.Args); i++ {
@@ -115,7 +122,9 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 					"arg":   op.Args[i],
 					"code":  "0",
 				})
+				m.writeMu.Lock()
 				_ = conn.WriteMessage(websocket.TextMessage, ack)
+				m.writeMu.Unlock()
 			}
 		case "unsubscribe":
 			// no-op for tests
@@ -189,7 +198,9 @@ func TestConnPublicSubscribePush(t *testing.T) {
 		"ts":     1700000000123,
 		"data":   []map[string]string{{"price": "100", "size": "1"}},
 	})
+	srv.writeMu.Lock()
 	_ = conn.WriteMessage(websocket.TextMessage, push)
+	srv.writeMu.Unlock()
 
 	select {
 	case ev := <-pushCh:

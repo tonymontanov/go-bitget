@@ -23,7 +23,7 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | **M1** `mix/` REST core + market-data | done | `client.Mix()` factory, MIX `MarketDataClient` (GetSymbolInfo / GetOrderBook / GetMarketTicker / GetHistoricalCandles + 1m shortcut). |
 | **M2** `mix/trading.go` (REST trading) | done | CreateOrder / ModifyOrder / CancelOrder + batch (place / modify / cancel, ≤50 rows) + CancelAllOrders (global, by productType+marginCoin). Client-side validation (size>0, price>0 on limit, identifier required on modify/cancel), per-row clientOid pairing in batches, RateLimitEvent meta filled with category + OrderCount. `mix.Client` now takes a `ClientSettings{ProductType, MarginMode, MarginCoin}` triple at construction. |
 | **M3** `mix/account.go` (REST account) | done | GetAccount (`/accounts`, filtered by pinned marginCoin) / GetPosition (`/single-position`, zero-row filter, single non-empty leg) / GetOpenOrders (`/orders-pending`, internal cursor pagination via `idLessThan`, hard ceiling 10 pages × 100 orders) / GetOrderDetail (`/detail`, dispatches by orderId xor clientOid) / ClosePosition (`/close-positions`, market close in one-way mode; per-row failure → typed exchange error) / SetLeverage (`/set-leverage`, one-way mode) / SetPositionMode (`/set-position-mode`, account-global). |
-| **M4** `mix/stream.go` (public WS + order-book engine) | pending | `books` channel snapshot+delta with CRC32 validation, `ticker` / `trade` / `candle{tf}`; gap detection + resync |
+| **M4** `mix/stream.go` (public WS + order-book engine) | done | WatchOrderbook (`books` channel: full-depth snapshot + incremental deltas, top-25 CRC32 validation, dirty-on-mismatch + auto-resubscribe round-trip), WatchTicker, WatchTrades (per-tick fan-out), WatchKline (`candle{tf}`); shared lazy-init public `*ws.Conn` multiplexes every channel; per-Watch ctx scopes the subscription, not the connection. |
 | **M5** `mix/stream-private.go` (private WS) | pending | login + WatchOrders / WatchPositions / WatchAccount; auto-reconnect carries subscriptions |
 | **v1.0 release** | pending | error code coverage extended to MIX-specific codes, `examples/` for marketdata + signed trade + WS orderbook |
 | **v2.0** `spot/` profile | pending | Trading / Account / MarketData / Stream mirroring `mix/` |
@@ -89,8 +89,36 @@ openOrders, _ := mc.Account().GetOpenOrders(ctx, "BTCUSDT")
 _ = mc.Account().SetLeverage(ctx, "BTCUSDT", 10)
 _ = mc.Account().SetPositionMode(ctx, roottypes.PositionModeOneWay)
 
-// WebSocket subscriptions remain stubbed until M4 / M5 land — calling
-// them returns ErrorKindInvalidRequest with "not implemented yet (Mx)".
+// Public WebSocket streams — production-ready in M4.
+//
+// All Watch* take a ctx scoping the subscription lifetime, a typed
+// handler invoked once per delivered frame, and an errHandler called
+// on decode errors / CRC mismatches (nil = log-only). The underlying
+// public *ws.Conn is shared across every Watch* call and is lazily
+// dialed on the first subscription.
+streamCtx, streamCancel := context.WithCancel(ctx)
+defer streamCancel()
+
+_ = mc.Stream().WatchOrderbook(streamCtx, "BTCUSDT",
+    func(ob roottypes.OrderBookSnapshot) {
+        // Full local book — engine has applied snapshot/deltas and
+        // validated the Bitget top-25 CRC32; mismatches trigger a
+        // transparent unsubscribe→subscribe round-trip.
+    },
+    nil,
+)
+_ = mc.Stream().WatchTrades(streamCtx, "BTCUSDT",
+    func(t roottypes.TradeUpdate) { /* one TradeUpdate per fill */ },
+    nil,
+)
+_ = mc.Stream().WatchKline(streamCtx, "BTCUSDT", roottypes.Timeframe1m,
+    func(k roottypes.KlineUpdate) { /* in-progress 1m candle updates */ },
+    nil,
+)
+
+// Private WebSocket subscriptions remain stubbed until M5 lands —
+// calling them returns ErrorKindInvalidRequest with
+// "not implemented yet (M5)".
 ```
 
 End-to-end runnable demos will live under `examples/` (marketdata,
@@ -134,7 +162,8 @@ go-bitget/
                           #   market.go         — REST market-data (M1, done)
                           #   trading.go        — REST trading (M2, done)
                           #   account.go        — REST account/position (M3, done)
-                          #   stream.go         — public WS (M4 stubs)
+                          #   stream.go         — public WS (M4, done)
+                          #   orderbook-engine.go — local book + CRC32 (M4)
                           #   stream-private.go — private WS (M5 stubs)
                           #   types/            — MIX-only domain types
                           #   contract_test.go  — JSON-fixture parser tests
