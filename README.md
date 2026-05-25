@@ -22,7 +22,7 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | M0 internal/ws (Conn, login, plain-text ping, reconnect+jitter, resubscribe, dispatch) | done | mock-server tests for public / private / reconnect / pre-Start subscribe |
 | **M1** `mix/` REST core + market-data | done | `client.Mix()` factory, MIX `MarketDataClient` (GetSymbolInfo / GetOrderBook / GetMarketTicker / GetHistoricalCandles + 1m shortcut). |
 | **M2** `mix/trading.go` (REST trading) | done | CreateOrder / ModifyOrder / CancelOrder + batch (place / modify / cancel, ≤50 rows) + CancelAllOrders (global, by productType+marginCoin). Client-side validation (size>0, price>0 on limit, identifier required on modify/cancel), per-row clientOid pairing in batches, RateLimitEvent meta filled with category + OrderCount. `mix.Client` now takes a `ClientSettings{ProductType, MarginMode, MarginCoin}` triple at construction. |
-| **M3** `mix/account.go` (REST account) | pending | GetAccount / GetPosition / GetOpenOrders / GetOrderDetail / ClosePosition / SetLeverage / SetPositionMode |
+| **M3** `mix/account.go` (REST account) | done | GetAccount (`/accounts`, filtered by pinned marginCoin) / GetPosition (`/single-position`, zero-row filter, single non-empty leg) / GetOpenOrders (`/orders-pending`, internal cursor pagination via `idLessThan`, hard ceiling 10 pages × 100 orders) / GetOrderDetail (`/detail`, dispatches by orderId xor clientOid) / ClosePosition (`/close-positions`, market close in one-way mode; per-row failure → typed exchange error) / SetLeverage (`/set-leverage`, one-way mode) / SetPositionMode (`/set-position-mode`, account-global). |
 | **M4** `mix/stream.go` (public WS + order-book engine) | pending | `books` channel snapshot+delta with CRC32 validation, `ticker` / `trade` / `candle{tf}`; gap detection + resync |
 | **M5** `mix/stream-private.go` (private WS) | pending | login + WatchOrders / WatchPositions / WatchAccount; auto-reconnect carries subscriptions |
 | **v1.0 release** | pending | error code coverage extended to MIX-specific codes, `examples/` for marketdata + signed trade + WS orderbook |
@@ -82,9 +82,15 @@ _ = mc.Trading().CancelOrder(ctx, roottypes.CancelOrderRequest{
     OrderID: placed.OrderID,
 })
 
-// REST account and WebSocket subscriptions are stubs until M3 / M4 / M5
-// land — calling them returns ErrorKindInvalidRequest with "not
-// implemented yet (Mx)".
+// REST account / position queries — production-ready in M3.
+balance, _ := mc.Account().GetAccount(ctx)
+position, _ := mc.Account().GetPosition(ctx, "BTCUSDT")
+openOrders, _ := mc.Account().GetOpenOrders(ctx, "BTCUSDT")
+_ = mc.Account().SetLeverage(ctx, "BTCUSDT", 10)
+_ = mc.Account().SetPositionMode(ctx, roottypes.PositionModeOneWay)
+
+// WebSocket subscriptions remain stubbed until M4 / M5 land — calling
+// them returns ErrorKindInvalidRequest with "not implemented yet (Mx)".
 ```
 
 End-to-end runnable demos will live under `examples/` (marketdata,
@@ -127,7 +133,7 @@ go-bitget/
                           #   client.go         — *mix.Client + RegisterMixFactory init
                           #   market.go         — REST market-data (M1, done)
                           #   trading.go        — REST trading (M2, done)
-                          #   account.go        — REST account/position (M3 stubs)
+                          #   account.go        — REST account/position (M3, done)
                           #   stream.go         — public WS (M4 stubs)
                           #   stream-private.go — private WS (M5 stubs)
                           #   types/            — MIX-only domain types

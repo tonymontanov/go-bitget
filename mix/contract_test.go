@@ -506,12 +506,13 @@ func TestContract_GetHistoricalCandles1m_DefaultLength(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Trading (validation) / Account (stub) / Stream (stub).
+// Trading (validation) / Account (validation) / Stream (stub).
 //
-// Trading methods are real (M2) but the calls below pass a zero-value
-// request, which triggers fail-fast client-side validation BEFORE any
-// HTTP. So the assertion remains the same — ErrorKindInvalidRequest —
-// just for a different reason.
+// Trading and Account methods are real (M2 / M3); the calls below pass
+// either zero-value requests or empty identifiers, which triggers
+// fail-fast client-side validation BEFORE any HTTP. So the assertion
+// remains the same — ErrorKindInvalidRequest — just for a different
+// reason. Stream remains stubbed until M4 / M5.
 // ---------------------------------------------------------------------
 
 func TestStubsAndValidation_ReturnInvalidRequest(t *testing.T) {
@@ -554,30 +555,32 @@ func TestStubsAndValidation_ReturnInvalidRequest(t *testing.T) {
 		{"Trading.CancelAllOrders", func() error {
 			return m.Trading().CancelAllOrders(ctx, "BTCUSDT")
 		}},
-		{"Account.GetAccount", func() error {
-			_, err := m.Account().GetAccount(ctx)
+		// Account methods that fail-fast on client-side validation. The
+		// rest of Account/M3 is exercised by dedicated happy-path
+		// fixtures in account_contract_test.go.
+		{"Account.GetPosition_emptySymbol", func() error {
+			_, err := m.Account().GetPosition(ctx, "")
 			return err
 		}},
-		{"Account.GetPosition", func() error {
-			_, err := m.Account().GetPosition(ctx, "BTCUSDT")
+		{"Account.GetOrderDetail_noIdentifiers", func() error {
+			_, err := m.Account().GetOrderDetail(ctx, "BTCUSDT", "", "")
 			return err
 		}},
-		{"Account.GetOpenOrders", func() error {
-			_, err := m.Account().GetOpenOrders(ctx, "BTCUSDT")
+		{"Account.GetOrderDetail_emptySymbol", func() error {
+			_, err := m.Account().GetOrderDetail(ctx, "", "1", "")
 			return err
 		}},
-		{"Account.GetOrderDetail", func() error {
-			_, err := m.Account().GetOrderDetail(ctx, "BTCUSDT", "1", "")
-			return err
+		{"Account.ClosePosition_emptySymbol", func() error {
+			return m.Account().ClosePosition(ctx, "")
 		}},
-		{"Account.ClosePosition", func() error {
-			return m.Account().ClosePosition(ctx, "BTCUSDT")
+		{"Account.SetLeverage_emptySymbol", func() error {
+			return m.Account().SetLeverage(ctx, "", 5)
 		}},
-		{"Account.SetLeverage", func() error {
-			return m.Account().SetLeverage(ctx, "BTCUSDT", 5)
+		{"Account.SetLeverage_zero", func() error {
+			return m.Account().SetLeverage(ctx, "BTCUSDT", 0)
 		}},
-		{"Account.SetPositionMode", func() error {
-			return m.Account().SetPositionMode(ctx, roottypes.PositionModeOneWay)
+		{"Account.SetPositionMode_unknown", func() error {
+			return m.Account().SetPositionMode(ctx, roottypes.PositionMode("nonsense"))
 		}},
 		{"Stream.WatchOrderbook", func() error {
 			return m.Stream().WatchOrderbook(ctx, "BTCUSDT", nil, nil)
