@@ -1,0 +1,15 @@
+# Binaries left over from `go build` at the repo root (e.g. when running
+# `go build ./examples/marketdata` from the SDK root). The binary takes
+# the name of the example directory; never check it in.
+/marketdata
+/place-order
+/private-stream
+
+# IDE / OS junk
+.DS_Store
+*.swp
+
+# Local credential files used by examples (never commit secrets).
+credentials.json
+.env
+.env.local
