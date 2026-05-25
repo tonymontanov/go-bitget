@@ -121,6 +121,16 @@ func (m *streamMockServer) handle(w http.ResponseWriter, r *http.Request) {
 			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
 			continue
 		}
+		// Login frames carry credentials in the args[] payload, which
+		// the mock does not validate — every key/passphrase combination
+		// is accepted. Tests that need failure paths can extend the
+		// mock to return a non-zero code.
+		if strings.HasPrefix(string(body), `{"op":"login"`) {
+			m.writeMu.Lock()
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"login","code":"0"}`))
+			m.writeMu.Unlock()
+			continue
+		}
 		var op struct {
 			Op   string              `json:"op"`
 			Args []map[string]string `json:"args"`
@@ -171,19 +181,34 @@ func (m *streamMockServer) handle(w http.ResponseWriter, r *http.Request) {
 // socket.
 func (m *streamMockServer) pushFrame(t *testing.T, action, instType, channel, instID string, data any, tsMs int64) {
 	t.Helper()
+	m.pushFrameWithCoin(t, action, instType, channel, instID, "", data, tsMs)
+}
+
+// pushFrameWithCoin is the variant used by private-channel tests: the
+// "account" channel is keyed by `coin` rather than `instId`, so the
+// envelope arg must contain the coin field for the SDK's registry
+// dispatch (env.Arg.Key()) to match the originating subscription.
+func (m *streamMockServer) pushFrameWithCoin(t *testing.T, action, instType, channel, instID, coin string, data any, tsMs int64) {
+	t.Helper()
 	var conn *websocket.Conn = m.activeConn()
 	if conn == nil {
 		t.Fatalf("no active connection")
 	}
+	var arg = map[string]string{
+		"instType": instType,
+		"channel":  channel,
+	}
+	if instID != "" {
+		arg["instId"] = instID
+	}
+	if coin != "" {
+		arg["coin"] = coin
+	}
 	var frame = map[string]any{
 		"action": action,
-		"arg": map[string]string{
-			"instType": instType,
-			"channel":  channel,
-			"instId":   instID,
-		},
-		"data": data,
-		"ts":   tsMs,
+		"arg":    arg,
+		"data":   data,
+		"ts":     tsMs,
 	}
 	var raw []byte
 	var err error

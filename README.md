@@ -24,7 +24,7 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | **M2** `mix/trading.go` (REST trading) | done | CreateOrder / ModifyOrder / CancelOrder + batch (place / modify / cancel, ≤50 rows) + CancelAllOrders (global, by productType+marginCoin). Client-side validation (size>0, price>0 on limit, identifier required on modify/cancel), per-row clientOid pairing in batches, RateLimitEvent meta filled with category + OrderCount. `mix.Client` now takes a `ClientSettings{ProductType, MarginMode, MarginCoin}` triple at construction. |
 | **M3** `mix/account.go` (REST account) | done | GetAccount (`/accounts`, filtered by pinned marginCoin) / GetPosition (`/single-position`, zero-row filter, single non-empty leg) / GetOpenOrders (`/orders-pending`, internal cursor pagination via `idLessThan`, hard ceiling 10 pages × 100 orders) / GetOrderDetail (`/detail`, dispatches by orderId xor clientOid) / ClosePosition (`/close-positions`, market close in one-way mode; per-row failure → typed exchange error) / SetLeverage (`/set-leverage`, one-way mode) / SetPositionMode (`/set-position-mode`, account-global). |
 | **M4** `mix/stream.go` (public WS + order-book engine) | done | WatchOrderbook (`books` channel: full-depth snapshot + incremental deltas, top-25 CRC32 validation, dirty-on-mismatch + auto-resubscribe round-trip), WatchTicker, WatchTrades (per-tick fan-out), WatchKline (`candle{tf}`); shared lazy-init public `*ws.Conn` multiplexes every channel; per-Watch ctx scopes the subscription, not the connection. |
-| **M5** `mix/stream-private.go` (private WS) | pending | login + WatchOrders / WatchPositions / WatchAccount; auto-reconnect carries subscriptions |
+| **M5** `mix/stream-private.go` (private WS) | done | WatchOrders / WatchPositions / WatchAccount on a lazily-dialed signed `*ws.Conn`; per-row fan-out so the caller handler is invoked once per state change; auth pre-flight returns `ErrorKindAuth` when the signer has no credentials. |
 | **v1.0 release** | pending | error code coverage extended to MIX-specific codes, `examples/` for marketdata + signed trade + WS orderbook |
 | **v2.0** `spot/` profile | pending | Trading / Account / MarketData / Stream mirroring `mix/` |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
@@ -116,9 +116,24 @@ _ = mc.Stream().WatchKline(streamCtx, "BTCUSDT", roottypes.Timeframe1m,
     nil,
 )
 
-// Private WebSocket subscriptions remain stubbed until M5 lands —
-// calling them returns ErrorKindInvalidRequest with
-// "not implemented yet (M5)".
+// Private WebSocket streams — production-ready in M5.
+//
+// They run on a separate signed *ws.Conn that is lazily dialed on
+// the first private Watch* and performs the V2 login op
+// transparently. Calling them without API credentials returns
+// ErrorKindAuth.
+_ = mc.Stream().WatchOrders(streamCtx, "BTCUSDT",
+    func(o mixtypes.OrderInfo) { /* one OrderInfo per state change */ },
+    nil,
+)
+_ = mc.Stream().WatchPositions(streamCtx, "BTCUSDT",
+    func(p mixtypes.PositionInfo) { /* size / margin / pnl updates */ },
+    nil,
+)
+_ = mc.Stream().WatchAccount(streamCtx,
+    func(b roottypes.Balance) { /* per-margin-coin wallet snapshot */ },
+    nil,
+)
 ```
 
 End-to-end runnable demos will live under `examples/` (marketdata,
@@ -164,7 +179,7 @@ go-bitget/
                           #   account.go        — REST account/position (M3, done)
                           #   stream.go         — public WS (M4, done)
                           #   orderbook-engine.go — local book + CRC32 (M4)
-                          #   stream-private.go — private WS (M5 stubs)
+                          #   stream-private.go — private WS (M5, done)
                           #   types/            — MIX-only domain types
                           #   contract_test.go  — JSON-fixture parser tests
   spot/                   # v2.0 — Bitget spot category (planned)

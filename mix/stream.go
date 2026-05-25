@@ -90,6 +90,12 @@ type StreamClient struct {
 	// resyncing is the per-arg flag preventing back-to-back resync
 	// goroutines from racing each other.
 	resyncing map[string]struct{}
+
+	// privateState bundles every field that locks around the lazily
+	// constructed private *ws.Conn. Defined in stream-private.go and
+	// kept under its own mutex so the public-side fields above stay
+	// decoupled.
+	privateState privateConnState
 }
 
 func newStreamClient(c *Client) *StreamClient {
@@ -107,12 +113,13 @@ func newStreamClient(c *Client) *StreamClient {
 func (s *StreamClient) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		if s.publicConn != nil {
 			_ = s.publicConn.Close()
 			s.publicConn = nil
 		}
+		s.mu.Unlock()
 	})
+	s.closePrivate()
 	return nil
 }
 
