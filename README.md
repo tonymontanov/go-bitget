@@ -20,20 +20,26 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | M0 internal/bgerr (`Error` / `Kind` / `MapBitgetCode` / `MapHTTPStatus`) | done | table-driven tests |
 | M0 internal/rest (Bitget envelope `{code,msg,data,requestTime}`, `ACCESS-*` headers, observers) | done | httptest-based tests for GET / POST / 4xx / 5xx / ctx-cancel |
 | M0 internal/ws (Conn, login, plain-text ping, reconnect+jitter, resubscribe, dispatch) | done | mock-server tests for public / private / reconnect / pre-Start subscribe |
-| **M1** `mix/` REST core (Trading / Account / MarketData) | pending | CreateOrder / Modify / Cancel / Batch\* / CancelAll / CancelForgottenOrders / GetOpenOrders / GetPosition / GetWalletBalance / SetLeverage / SetMarginMode / GetSymbolInfo / GetOrderBook / GetHistoricalCandles |
-| **M2** `orderbook/` engine (snapshot + delta + checksum + resync) | pending | `books` channel CRC32 validation, gap detection |
-| **M3** `mix/stream.go` (WS subscriptions) | pending | public: WatchOrderBook / WatchTicker / WatchTrades / WatchKline; private: WatchOrders / WatchPositions / WatchAccount |
-| **M4** errors mapping + examples | pending | extended `MapBitgetCode` (40762/40774/45117/40725) with table-driven tests; `examples/` for marketdata, signed trade, WS orderbook |
+| **M1** `mix/` REST core + market-data | done | `client.Mix()` factory, MIX `MarketDataClient` (GetSymbolInfo / GetOrderBook / GetMarketTicker / GetHistoricalCandles + 1m shortcut). Trading / Account / Stream methods are signature-stable stubs; full implementations in M2-M5. |
+| **M2** `mix/trading.go` (REST trading) | pending | CreateOrder / ModifyOrder / CancelOrder + batch (place / modify / cancel) + CancelAllOrders + CancelForgottenOrders, with client-side validation, ID mapping cache and per-symbol RateLimitEvent metadata |
+| **M3** `mix/account.go` (REST account) | pending | GetAccount / GetPosition / GetOpenOrders / GetOrderDetail / ClosePosition / SetLeverage / SetPositionMode |
+| **M4** `mix/stream.go` (public WS + order-book engine) | pending | `books` channel snapshot+delta with CRC32 validation, `ticker` / `trade` / `candle{tf}`; gap detection + resync |
+| **M5** `mix/stream-private.go` (private WS) | pending | login + WatchOrders / WatchPositions / WatchAccount; auto-reconnect carries subscriptions |
+| **v1.0 release** | pending | error code coverage extended to MIX-specific codes, `examples/` for marketdata + signed trade + WS orderbook |
 | **v2.0** `spot/` profile | pending | Trading / Account / MarketData / Stream mirroring `mix/` |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
 ## Quick start
 
+The MIX profile is wired through `client.Mix()`. Make sure the package
+is imported (anonymously is fine) so its `init()` registers the
+factory.
+
 ```go
 import (
     bitget "github.com/tonymontanov/go-bitget/v2"
     "github.com/tonymontanov/go-bitget/v2/mix"
-    mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
+    roottypes "github.com/tonymontanov/go-bitget/v2/types"
 )
 
 cfg := bitget.DefaultConfig()
@@ -45,20 +51,25 @@ if err != nil {
 }
 defer client.Close()
 
+// USDT-margined perpetuals (default). Use mix.NewClientWithProductType
+// to target USDC- or coin-margined contracts instead.
 mc := client.Mix().(*mix.Client)
 
-// REST: top of book.
-ob, _ := mc.MarketData().GetOrderBook(ctx, "BTCUSDT", 50)
+// REST market data — production-ready in M1.
+info, _ := mc.MarketData().GetSymbolInfo(ctx, "BTCUSDT")
+ob,   _ := mc.MarketData().GetOrderBook(ctx, "BTCUSDT", 50)
+tk,   _ := mc.MarketData().GetMarketTicker(ctx, "BTCUSDT")
+candles, _ := mc.MarketData().GetHistoricalCandles(ctx, "BTCUSDT",
+    roottypes.Timeframe1m, 100)
 
-// WS: keep top-of-book in sync (engine-backed).
-_ = mc.Stream().WatchOrderBook(ctx, "BTCUSDT", 50, 5,
-    func(ob mixtypes.OrderBookSnapshot) { /* ... */ },
-    func(err error) { /* ErrorKindInvalidRequest on gap, etc. */ },
-)
+// REST trading / account and WebSocket subscriptions are stubs in M1
+// — calling them returns ErrorKindInvalidRequest with "not implemented
+// yet (M2/M3/M4/M5)" until the corresponding milestone lands.
 ```
 
 End-to-end runnable demos will live under `examples/` (marketdata,
-signed trade, WS orderbook) once `mix/` is implemented in M1.
+signed trade, WS orderbook) once the corresponding milestones land
+(M2 trading, M4 public WS, M5 private WS).
 
 ## Dependencies
 
@@ -93,15 +104,17 @@ go-bitget/
                           #   Timeframe / TradeUpdate / KlineUpdate /
                           #   CancelOrderRequest / Balance / CoinBalance
   mix/                    # v1.0 — MIX (USDT-margined perps)
-                          #   mix/types: alias re-exports + mix-only types
-                          #   (SymbolInfo / OrderInfo / Create/Modify /
-                          #    ExecutionInfo / TickerUpdate / PositionInfo /
-                          #    BatchOrderResult)
+                          #   client.go         — *mix.Client + RegisterMixFactory init
+                          #   market.go         — REST market-data (M1, done)
+                          #   trading.go        — REST trading (M2 stubs)
+                          #   account.go        — REST account/position (M3 stubs)
+                          #   stream.go         — public WS (M4 stubs)
+                          #   stream-private.go — private WS (M5 stubs)
+                          #   types/            — MIX-only domain types
+                          #   contract_test.go  — JSON-fixture parser tests
   spot/                   # v2.0 — Bitget spot category (planned)
   uta/                    # v2.5 — Unified Trading Account (planned)
-  orderbook/              # M2 — profile-agnostic engine (planned)
   examples/               # runnable end-to-end demos (planned)
-  scripts/run.sh          # loads .env and forwards to `go run`
 ```
 
 ## Architecture (brief)
