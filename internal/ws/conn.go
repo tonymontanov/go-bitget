@@ -477,8 +477,18 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 		}
 		var env Envelope
 		if err = codec.Unmarshal(body, &env); err != nil {
+			// Surface a truncated body sample so operators can see WHY
+			// the parse failed without dumping potentially-large pushes
+			// to the log. 200 bytes is enough to capture login acks /
+			// errors (98-byte frames have been observed in the field).
+			var sample string = string(body)
+			if len(sample) > 200 {
+				sample = sample[:200] + "..."
+			}
 			c.logger.Debug("ws: unparseable frame during login wait",
-				bglog.Int("body_len", int64(len(body))))
+				bglog.Int("body_len", int64(len(body))),
+				bglog.Str("body_sample", sample),
+				bglog.Err(err))
 			continue
 		}
 		if env.Event != "login" && env.Event != "error" {
@@ -486,14 +496,14 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 			// surface in debug so the wait isn't a black box.
 			c.logger.Debug("ws: non-login frame during login wait",
 				bglog.Str("event", env.Event),
-				bglog.Str("code", env.Code))
+				bglog.Str("code", env.Code.String()))
 			continue
 		}
 		if env.Event == "login" && env.Code == "0" {
 			c.logger.Info("ws: login ok")
 			return nil
 		}
-		return fmt.Errorf("login rejected: code=%s msg=%s", env.Code, env.Msg)
+		return fmt.Errorf("login rejected: code=%s msg=%s", env.Code.String(), env.Msg)
 	}
 	return errors.New("ws: login ack not received")
 }
@@ -571,11 +581,11 @@ func (c *Conn) handleControl(env *Envelope) {
 		)
 	case "login":
 		c.logger.Debug("ws: login ack",
-			bglog.Str("code", env.Code),
+			bglog.Str("code", env.Code.String()),
 		)
 	case "error":
 		c.logger.Warn("ws: server error",
-			bglog.Str("code", env.Code),
+			bglog.Str("code", env.Code.String()),
 			bglog.Str("msg", env.Msg),
 		)
 	default:

@@ -33,7 +33,73 @@ by which fields are populated (Event for control, Action for push).
 
 package ws
 
-import "github.com/tonymontanov/go-bitget/v2/internal/codec"
+import (
+	"strconv"
+
+	"github.com/tonymontanov/go-bitget/v2/internal/codec"
+)
+
+/*
+flexCode accepts either a JSON string or a JSON number and stores the
+canonical decimal form as a string.
+
+WHY:
+Bitget V2 WS is internally inconsistent here. The published examples
+in https://www.bitget.com/api-doc/common/websocket-intro show the
+"code" field quoted ("code":"0"), but the live server actually emits
+JSON numbers for the same field on at least the login and subscribe
+acks (`tiagosiebler/bitget-api` keys off `typeof msg['code'] ===
+'number'` to detect the success path). If we declare Code as a plain
+`string`, jsoniter rejects the number form and the entire envelope
+parse fails — we then misclassify the frame as "garbage", drop it,
+and time out waiting for a login ack that has, in fact, already
+arrived (observed: 98-byte frame ~300ms after the login op, with
+RTT well under 1s). flexCode unifies both shapes into a stable
+string representation so the rest of the dispatcher can keep its
+`switch env.Code { case "0": ... }` style without caring about the
+wire form.
+
+NUMBER PRESERVATION:
+For numeric input we keep the raw byte form rather than reformatting
+through float64 — that's what avoids "0.000000e+00" surprises on
+"code":0 and keeps "30005" identical between the wire and the log.
+*/
+type flexCode string
+
+// UnmarshalJSON implements json.Unmarshaler — accepted both by the
+// std library and by jsoniter's reflection-based decoder.
+func (c *flexCode) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*c = ""
+		return nil
+	}
+	if data[0] == '"' && data[len(data)-1] == '"' {
+		var s string
+		if err := codec.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*c = flexCode(s)
+		return nil
+	}
+	// Numeric form. Keep the raw bytes — they are the canonical
+	// decimal representation and match what tests / dispatchers
+	// compare against.
+	if _, err := strconv.ParseInt(string(data), 10, 64); err == nil {
+		*c = flexCode(string(data))
+		return nil
+	}
+	// Last-resort: float (we have not seen this from Bitget but the
+	// std-lib accepts it for forward compatibility).
+	if _, err := strconv.ParseFloat(string(data), 64); err == nil {
+		*c = flexCode(string(data))
+		return nil
+	}
+	*c = flexCode(string(data))
+	return nil
+}
+
+// String returns the canonical decimal form for use in switch / equality.
+func (c flexCode) String() string { return string(c) }
 
 // SubscriptionArg identifies a single Bitget WS subscription on the wire.
 //
@@ -89,11 +155,15 @@ type outboundOp struct {
 //     Action ("snapshot" | "update") and Arg/Data are populated; Event empty.
 //   - For pong frames Bitget sends a plain-text body "pong" — handled
 //     before the JSON unmarshal step in conn.go.
+//
+// Code is typed as flexCode because the Bitget V2 server emits this
+// field as JSON-number on login/subscribe acks even though its own
+// docs show it quoted; see flexCode for the full story.
 type Envelope struct {
 	// Control fields.
-	Event string `json:"event"`
-	Code  string `json:"code"`
-	Msg   string `json:"msg"`
+	Event string   `json:"event"`
+	Code  flexCode `json:"code"`
+	Msg   string   `json:"msg"`
 	// Data fields.
 	Action   string          `json:"action"`
 	Arg      SubscriptionArg `json:"arg"`

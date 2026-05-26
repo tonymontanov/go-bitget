@@ -4,6 +4,42 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.0.4 — 2026-05-26
+
+### Fixed
+
+- **WS envelope `code` field now accepts JSON-number form.** This was
+  the actual reason private-WS login still timed out after v1.0.2 —
+  not the timestamp, not the network. The Bitget V2 docs show the
+  field as a quoted string (`"code":"0"`), but the live server
+  emits it as a JSON number on login and subscribe acks
+  (`tiagosiebler/bitget-api` confirms this with a `typeof code ===
+  'number'` switch). Our `Envelope.Code string` declaration made
+  jsoniter reject the number form; the entire ack envelope failed
+  to parse, the dispatcher dropped it as garbage, and the supervisor
+  blocked on its read deadline waiting for an ack that had already
+  arrived ~300ms after the login op (98-byte frame, observed in
+  the field log as `ws: unparseable frame during login wait`).
+
+  New `flexCode` type accepts both shapes and canonicalises to a
+  decimal string. The rest of the dispatcher keeps its
+  `switch env.Code { case "0": ... }` ergonomics. Push frames
+  (which don't carry a code) still parse cleanly.
+
+- **Diagnostic body sample on parse failure.** The
+  `ws: unparseable frame during login wait` debug log now includes
+  a 200-byte truncated body sample plus the underlying jsoniter
+  error, so future schema drift surfaces with the actual wire
+  bytes instead of just a length.
+
+### Added
+
+- **Test coverage in `internal/ws/protocol_test.go`** for both
+  documented (string) and live (number) shapes of `code`, including
+  a numeric error code (30005), the `null` literal, and a push-frame
+  smoke test guarding against accidentally breaking the data path
+  with the type change.
+
 ## v1.0.3 — 2026-05-26
 
 ### Changed
