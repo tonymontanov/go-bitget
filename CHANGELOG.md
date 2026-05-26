@@ -4,6 +4,42 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.0.2 — 2026-05-26
+
+### Fixed
+
+- **WS login timestamp now uses SECONDS, not milliseconds.** Production
+  logs from the `PARTIUSDT` MIX session showed the private-WS supervisor
+  in an unbreakable reconnect loop: every connect succeeded, every
+  `op:login` was sent, and every login deadline expired (`login ack not
+  received within 15s`). Bitget V2's WS login server hashes the
+  pre-image `timestamp + "GET" + "/user/verify"` with **seconds-precision
+  timestamps** (per the official docs Java example
+  `Long ts = System.currentTimeMillis()/1000;` and the canonical
+  `"1538054050"` sample value — 10 digits, not 13). When we sent the
+  13-digit ms timestamp the server's HMAC compare failed silently — it
+  did **not** return `{"event":"login","code":!=0}`, it just dropped the
+  frame. That made the failure indistinguishable from packet loss to
+  the client, which then timed out and reconnected forever, so no
+  private push (`orders` / `positions` / `account`) ever reached the
+  caller. Two symptoms surfaced together for affected operators:
+  positions opened in another app didn't appear in WatchPositions, and
+  `app.log` was carpeted with `login ack not received within 15s` warns.
+  Fix: new `Signer.SecondsTimestamp(now time.Time)` returns the
+  10-digit Unix-seconds string, and `internal/ws/conn.go::performLogin`
+  switched from `MillisTimestamp` to `SecondsTimestamp`. REST signing
+  is unaffected — REST still uses ms per Bitget docs (the WS/REST
+  units differ in the official spec, this was the trap).
+
+### Added
+
+- **`Signer.SecondsTimestamp`** — helper for the WS login path. The
+  REST helper `MillisTimestamp` remains unchanged. Both helpers have
+  cross-references in their godoc.
+- **Regression test** `TestSecondsTimestamp` asserting 10-digit
+  output and the sub-second-truncation behaviour, so the seconds /
+  milliseconds split can't silently re-regress.
+
 ## v1.0.1 — 2026-05-26
 
 ### Changed

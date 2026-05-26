@@ -5,7 +5,7 @@ HFT / algorithmic trading.
 
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
-Latest stable: **v1.0.0** — production-ready MIX (USDT-margined perps).
+Latest stable: **v1.0.2** — production-ready MIX (USDT-margined perps).
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
@@ -264,6 +264,13 @@ returns them.
   ```
 
   with `sign = base64(HMAC_SHA256(secret, timestamp + "GET" + "/user/verify"))`.
+
+  **`timestamp` is in SECONDS** (10 digits, e.g. `"1538054050"`) — Bitget V2
+  WS deviates from its own REST convention (REST uses milliseconds). Sending
+  ms made the server silently drop the login frame, the client hit the read
+  deadline, reconnected, re-logged-in, timed out again, ad infinitum. The
+  SDK uses `Signer.SecondsTimestamp` for the WS login path and
+  `Signer.MillisTimestamp` for REST — fixed in v1.0.2 (see CHANGELOG).
 
 Reconnect, backoff with jitter, resubscribe and login (for private) are
 transparent to the caller.

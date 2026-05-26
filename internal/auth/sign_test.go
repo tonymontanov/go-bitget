@@ -130,12 +130,15 @@ func TestSignRESTComposition(t *testing.T) {
 
 func TestSignWSDeterministic(t *testing.T) {
 	var s *Signer = NewSigner(testKey, testSecret, testPassphrase)
-	var a, err = s.SignWS("1700000000000")
+	// 10-digit seconds timestamp — what production code (SecondsTimestamp)
+	// feeds into SignWS. SignWS itself is a pure hmac-base64 helper so any
+	// string input would work, but the test value mirrors the wire format.
+	var a, err = s.SignWS("1700000000")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var b string
-	b, _ = s.SignWS("1700000000000")
+	b, _ = s.SignWS("1700000000")
 	if a != b {
 		t.Fatal("WS signature is non-deterministic")
 	}
@@ -160,6 +163,27 @@ func TestMillisTimestamp(t *testing.T) {
 	var auto string = s.MillisTimestamp(time.Time{})
 	if auto == "" {
 		t.Fatal("MillisTimestamp(zero) returned empty string")
+	}
+}
+
+// TestSecondsTimestamp verifies the seconds-precision timestamp used for
+// WS login (Bitget V2 WS server hashes seconds, not ms). The 10-digit
+// invariant guards against regressing back to ms (13-digit) — that
+// regression caused silent login drops + 15s reconnect loops in the
+// field (see CHANGELOG v1.0.2).
+func TestSecondsTimestamp(t *testing.T) {
+	var s *Signer = NewSigner(testKey, testSecret, testPassphrase)
+	var t0 time.Time = time.Unix(1700000000, 999000000) // sub-second part must be dropped
+	var ts string = s.SecondsTimestamp(t0)
+	if ts != "1700000000" {
+		t.Fatalf("SecondsTimestamp = %q, want %q", ts, "1700000000")
+	}
+	if len(ts) != 10 {
+		t.Fatalf("SecondsTimestamp length = %d, want 10 (regression: WS login wants seconds, not ms)", len(ts))
+	}
+	var auto string = s.SecondsTimestamp(time.Time{})
+	if len(auto) != 10 {
+		t.Fatalf("SecondsTimestamp(zero) length = %d, want 10", len(auto))
 	}
 }
 

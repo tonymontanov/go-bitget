@@ -389,7 +389,11 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 	if c.signer == nil || !c.signer.Enabled() {
 		return errors.New("ws: private endpoint requires signer with credentials")
 	}
-	var ts string = c.signer.MillisTimestamp(time.Time{})
+	// Bitget V2 WS login takes the timestamp in SECONDS (not ms — REST
+	// uses ms, WS doesn't). Sending ms made the server silently drop the
+	// login frame and the client timed out on its login deadline. See
+	// internal/auth/sign.go for the docs trail.
+	var ts string = c.signer.SecondsTimestamp(time.Time{})
 	var signature string
 	var err error
 	signature, err = c.signer.SignWS(ts)

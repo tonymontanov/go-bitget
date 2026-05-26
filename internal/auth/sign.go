@@ -32,9 +32,19 @@ Request signing for Bitget. Two flavours:
      preHash   = timestamp + "GET" + "/user/verify"
      signature = base64( HMAC_SHA256(secretKey, preHash) )
 
-     - timestamp: Unix time in MILLISECONDS as decimal string. Bitget's
-                  WS server checks server-side that |server_now - ts| < 30s
-                  and rejects otherwise.
+     - timestamp: Unix time in **SECONDS** as decimal string (10 digits as
+                  of 2026). This is one of the few places where Bitget
+                  deviates from its REST convention (REST uses ms). The
+                  official Bitget V2 WS docs explicitly call this out
+                  with a `System.currentTimeMillis()/1000` example and
+                  the canonical `"1538054050"` sample — 10 digits. Sending
+                  milliseconds makes the HMAC pre-hash diverge from what
+                  the server computes; the server then silently drops the
+                  frame instead of returning a {"event":"login","code":!=0}
+                  ack, so the client times out on its login deadline and
+                  reconnect-loops forever. See SecondsTimestamp below.
+
+                  Bitget's WS server allows ±30s skew (vs ±30s in REST too).
 
      The signature is sent as part of the JSON message:
        {"op":"login","args":[{"apiKey":...,"passphrase":...,"timestamp":...,"sign":...}]}
@@ -113,13 +123,30 @@ func (s *Signer) Passphrase() string {
 }
 
 // MillisTimestamp returns now in milliseconds as a decimal string. Used for
-// ACCESS-TIMESTAMP and as the timestamp component of the pre-hash. If now
-// is zero, time.Now() is used.
+// ACCESS-TIMESTAMP on REST and as the timestamp component of the REST
+// pre-hash. If now is zero, time.Now() is used.
+//
+// Do NOT use for WS login — see SecondsTimestamp.
 func (s *Signer) MillisTimestamp(now time.Time) string {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	return strconv.FormatInt(now.UnixMilli(), 10)
+}
+
+// SecondsTimestamp returns now in **seconds** as a decimal string. Used
+// specifically for the Bitget V2 WebSocket login op — its server computes
+// the HMAC pre-hash from a seconds-precision timestamp (per Bitget's
+// docs example `Long ts = System.currentTimeMillis()/1000;` and the
+// `"1538054050"` reference value). If we send milliseconds the server
+// silently drops the login frame and the client times out.
+//
+// If now is zero, time.Now() is used.
+func (s *Signer) SecondsTimestamp(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return strconv.FormatInt(now.Unix(), 10)
 }
 
 /*
@@ -157,7 +184,9 @@ WebSocket auth message:
 	preHash = timestamp + "GET" + "/user/verify"
 
 Parameters:
-  - timestamp: ms timestamp string. Bitget's WS server allows ±30s skew.
+  - timestamp: **SECONDS** timestamp string (use SecondsTimestamp).
+    Bitget's WS server allows ±30s skew.  See the package doc comment
+    on top of this file for why WS uses seconds and REST uses ms.
 
 Returns ErrSignerDisabled if the signer has no credentials.
 */
