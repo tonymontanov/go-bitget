@@ -5,7 +5,7 @@ HFT / algorithmic trading.
 
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
-Latest stable: **v1.0.4** — production-ready MIX (USDT-margined perps).
+Latest stable: **v1.1.0** — production-ready MIX (USDT-margined perps).
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status

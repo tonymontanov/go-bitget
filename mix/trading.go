@@ -40,9 +40,25 @@ Config.RateLimitEventObserver.
 
 NEW CLIENT-ORDER-ID ON MODIFY:
 Bitget MIX requires a NEW clientOid on every modify-order — the old
-one cannot be reused. The SDK currently passes through ModifyOrderRequest.
-ClientOrderID as the new clientOid (callers own the ID space). M3
-will revisit if a per-cycle UUID generator is needed for the desk.
+one cannot be reused (server returns code=40786 "Duplicate clientOid"
+otherwise; observed in PARTIUSDT field session). ModifyOrderRequest
+exposes a dedicated NewClientOrderID field; when the caller leaves
+it blank the SDK auto-generates a `m-<16-hex>` token via crypto/rand
+so the modify always succeeds. The existing ClientOrderID is sent
+as the `clientOid` identifier of the order being amended (when
+OrderID is empty).
+
+NO BATCH-MODIFY ON BITGET V2:
+Despite the symmetric naming, Bitget V2 has NEVER shipped a
+`batch-modify-order` endpoint for MIX — the URL returns HTTP 404
+with code=40404 "Request URL NOT FOUND" (verified in production,
+confirmed against tiagosiebler/bitget-api and the official docs
+which list batch-place / batch-cancel only). Batch modify exists
+only on the V3 (UTA) trade API. ModifyBatchOrders therefore
+fails fast with ErrorKindInvalidRequest and a clear remediation
+hint — issue per-order ModifyOrder calls in a loop, or
+cancel-then-place if the modify pattern is unsupported by the
+caller's strategy. Saves a needless 404 round-trip.
 
 CANCEL-ALL SCOPE:
 POST /api/v2/mix/order/cancel-all-orders is GLOBAL by productType +
@@ -60,7 +76,10 @@ package mix
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"strconv"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -69,6 +88,35 @@ import (
 	mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
 )
+
+// timeNowNano returns the current monotonic time in nanoseconds.
+// Indirected through a var so tests can stub determinism if needed.
+var timeNowNano = func() int64 { return time.Now().UnixNano() }
+
+// genNewClientOid produces a venue-acceptable clientOid for the
+// modified order when the caller did not provide one. Format
+// `m-<32-hex>` (34 chars total, well under Bitget's 50-char cap).
+//
+// Why crypto/rand: this is the only generator already linked into
+// the standard library that gives a collision-resistant token
+// without pulling a UUID dep. The hex output is monotonically safe
+// across goroutines (no shared state) and deterministic-shaped, so
+// log greps and idempotency caches stay simple.
+//
+// On the (extremely unlikely) read failure from /dev/urandom we
+// degrade to a timestamp-derived ID rather than returning an error
+// — modify must not refuse to ship just because the OS RNG
+// momentarily glitched.
+func genNewClientOid() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Fallback: nanoseconds-since-epoch hex; still unique enough
+		// for clientOid purposes, and we never silently drop the
+		// modify request.
+		return "m-" + strconv.FormatInt(timeNowNano(), 16)
+	}
+	return "m-" + hex.EncodeToString(buf[:])
+}
 
 // maxBatchSize — Bitget V2 cap on batch-place-order /
 // batch-modify-order / batch-cancel-orders. Enforced client-side so
@@ -187,10 +235,19 @@ type modifyOrderResp struct {
 	ClientOid string `json:"clientOid"`
 }
 
-// ModifyOrder amends size and / or price on an open MIX order. Either
-// OrderID or ClientOrderID identifies the target; the same
-// ClientOrderID also acts as the NEW clientOid (Bitget requires a new
-// one on every amend, so we reuse the caller-supplied identity).
+// ModifyOrder amends size and / or price on an open MIX order.
+//
+// Identification: either OrderID or ClientOrderID points at the
+// existing order. If both are populated, OrderID wins (Bitget's
+// documented precedence rule).
+//
+// New clientOid: req.NewClientOrderID flows through as the venue's
+// `newClientOid`. If the caller leaves it empty the SDK auto-fills
+// a `m-<32-hex>` token via crypto/rand — Bitget V2 mandates
+// newClientOid to be non-empty AND distinct from the existing
+// clientOid (else code=40786 "Duplicate clientOid"; observed in
+// PARTIUSDT field session under v1.0.3 when the SDK reused
+// req.ClientOrderID for both fields).
 func (t *TradingClient) ModifyOrder(ctx context.Context, req mixtypes.ModifyOrderRequest) (mixtypes.OrderInfo, error) {
 	var out mixtypes.OrderInfo
 	var err error
@@ -198,12 +255,31 @@ func (t *TradingClient) ModifyOrder(ctx context.Context, req mixtypes.ModifyOrde
 		return out, err
 	}
 
+	// Resolve the new clientOid up-front so the value is observable
+	// by the caller in OrderInfo.ClientOrderID even if the venue
+	// echoes an empty string (defensive).
+	var newClientOid string = req.NewClientOrderID
+	if newClientOid == "" {
+		newClientOid = genNewClientOid()
+	}
+	if newClientOid == req.ClientOrderID && req.ClientOrderID != "" {
+		// Caller explicitly supplied the same ID for both — Bitget
+		// will reject this with 40786. We could regen silently but
+		// surfacing the misuse early is clearer than a confusing
+		// server-side rejection two RTTs from now.
+		return out, bitget.NewError(
+			bitget.ErrorKindInvalidRequest, "",
+			"mix.Trading.ModifyOrder: NewClientOrderID must differ from ClientOrderID (Bitget rejects with code=40786 otherwise)",
+			nil,
+		)
+	}
+
 	var body modifyOrderBody = modifyOrderBody{
 		Symbol:       req.Symbol,
 		ProductType:  string(t.c.productType),
 		OrderID:      req.OrderID,
 		ClientOid:    req.ClientOrderID,
-		NewClientOid: req.ClientOrderID,
+		NewClientOid: newClientOid,
 	}
 	if !req.NewQuantity.IsZero() {
 		body.NewSize = req.NewQuantity.String()
@@ -234,7 +310,7 @@ func (t *TradingClient) ModifyOrder(ctx context.Context, req mixtypes.ModifyOrde
 	}
 	return mixtypes.OrderInfo{
 		OrderID:       data.OrderID,
-		ClientOrderID: chooseClientOid(data.ClientOid, req.ClientOrderID),
+		ClientOrderID: chooseClientOid(data.ClientOid, newClientOid),
 		Symbol:        req.Symbol,
 		Status:        roottypes.OrderStatusLive,
 		Quantity:      req.NewQuantity,
@@ -402,33 +478,36 @@ func (t *TradingClient) CreateBatchOrders(ctx context.Context, reqs []mixtypes.C
 	return collateBatchResultsFromCreate(reqs, clientOids, data, symbol), nil
 }
 
-// batchModifyOrderBody is the wire payload for batch-modify-order.
-type batchModifyOrderBody struct {
-	ProductType string                  `json:"productType"`
-	Symbol      string                  `json:"symbol"`
-	OrderList   []batchModifyOrderEntry `json:"orderList"`
-}
-
-type batchModifyOrderEntry struct {
-	OrderID      string `json:"orderId,omitempty"`
-	ClientOid    string `json:"clientOid,omitempty"`
-	NewClientOid string `json:"newClientOid"`
-	NewSize      string `json:"newSize,omitempty"`
-	NewPrice     string `json:"newPrice,omitempty"`
-}
-
 /*
-ModifyBatchOrders amends a batch of MIX orders. Same shape contract
-as CreateBatchOrders (per-symbol, 1..50 rows). Per-row identity is
-either OrderID or ClientOrderID; NewClientOid mirrors ClientOrderID
-(Bitget requires a new clientOid on every amend).
+ModifyBatchOrders is a no-op stub on Bitget V2: the venue has never
+shipped a `/api/v2/mix/order/batch-modify-order` endpoint. The URL
+returns HTTP 404 + code=40404 "Request URL NOT FOUND" (verified in
+production logs and against the official spec
+https://www.bitget.com/api-doc/contract/trade/Modify-Order, which
+lists batch-place / batch-cancel only — not batch-modify). The
+batch-modify capability lives on the V3 (UTA) trade API.
+
+Rather than serialise a request that we KNOW will round-trip to a
+404, this method returns an explicit ErrorKindInvalidRequest with
+remediation hints so the desk-side connector can fall back cleanly
+(loop of single ModifyOrder calls, or cancel-then-place). The
+behavioural contract from the caller's perspective is "this batch
+of modifications failed end-to-end" — same shape it would see if
+the server actually did return 40404, but two RTTs faster.
+
+When/if Bitget extends V2 with a real batch-modify endpoint we'll
+restore the wire body + resp parsing. For now keeping this method
+on the surface (rather than deleting it) means the desk-core
+ConnectorWrapper interface stays stable across the V2/V3 cut-over.
 */
-func (t *TradingClient) ModifyBatchOrders(ctx context.Context, reqs []mixtypes.ModifyOrderRequest) ([]mixtypes.BatchOrderResult, error) {
+func (t *TradingClient) ModifyBatchOrders(_ context.Context, reqs []mixtypes.ModifyOrderRequest) ([]mixtypes.BatchOrderResult, error) {
+	// Validate inputs anyway — gives callers consistent errors when
+	// they pass garbage, and surfaces the unsupported-by-venue path
+	// cleanly when inputs are well-formed.
 	var err error
 	if err = validateBatchSize("ModifyBatchOrders", len(reqs)); err != nil {
 		return nil, err
 	}
-
 	var symbol string = reqs[0].Symbol
 	var i int
 	for i = 0; i < len(reqs); i++ {
@@ -439,52 +518,13 @@ func (t *TradingClient) ModifyBatchOrders(ctx context.Context, reqs []mixtypes.M
 			return nil, bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading.ModifyBatchOrders: all rows must share the same symbol (row 0="+symbol+", row "+strconv.Itoa(i)+"="+reqs[i].Symbol+")", nil)
 		}
 	}
-
-	var body batchModifyOrderBody = batchModifyOrderBody{
-		ProductType: string(t.c.productType),
-		Symbol:      symbol,
-		OrderList:   make([]batchModifyOrderEntry, len(reqs)),
-	}
-	for i = 0; i < len(reqs); i++ {
-		body.OrderList[i] = batchModifyOrderEntry{
-			OrderID:      reqs[i].OrderID,
-			ClientOid:    reqs[i].ClientOrderID,
-			NewClientOid: reqs[i].ClientOrderID,
-		}
-		if !reqs[i].NewQuantity.IsZero() {
-			body.OrderList[i].NewSize = reqs[i].NewQuantity.String()
-		}
-		if !reqs[i].NewPrice.IsZero() {
-			body.OrderList[i].NewPrice = reqs[i].NewPrice.String()
-		}
-	}
-
-	var resp rest.Response
-	resp, _, err = t.c.rest().Do(ctx, rest.Options{
-		Method: "POST",
-		Path:   "/api/v2/mix/order/batch-modify-order",
-		Body:   body,
-		Signed: true,
-		Meta: rest.RequestMeta{
-			Symbols:    []string{symbol},
-			OrderCount: len(reqs),
-			Category:   string(bitget.RateLimitCategoryAmend),
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var data batchOrderResp
-	if err = resp.UnmarshalData(&data); err != nil {
-		return nil, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Trading.ModifyBatchOrders: parse", err)
-	}
-
-	var clientOids []string = make([]string, len(reqs))
-	for i = 0; i < len(reqs); i++ {
-		clientOids[i] = reqs[i].ClientOrderID
-	}
-	return collateBatchResultsFromModify(reqs, clientOids, data, symbol), nil
+	return nil, bitget.NewError(
+		bitget.ErrorKindInvalidRequest, "",
+		"mix.Trading.ModifyBatchOrders: Bitget V2 does not support batch order modification "+
+			"(POST /api/v2/mix/order/batch-modify-order returns HTTP 404 / code=40404 in production); "+
+			"call ModifyOrder per row, or use CancelBatchOrders + CreateBatchOrders",
+		nil,
+	)
 }
 
 // batchCancelOrderBody is the wire payload for batch-cancel-orders.
@@ -709,9 +749,6 @@ func validateModifyOrderRequest(req mixtypes.ModifyOrderRequest) error {
 	if req.OrderID == "" && req.ClientOrderID == "" {
 		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading: either orderId or clientOrderId is required", nil)
 	}
-	if req.ClientOrderID == "" {
-		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading: clientOrderId is required (Bitget needs a NEW clientOid on every modify)", nil)
-	}
 	if req.NewQuantity.IsZero() && req.NewPrice.IsZero() {
 		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading: at least one of newQuantity or newPrice must be set", nil)
 	}
@@ -857,91 +894,11 @@ func collateBatchResultsFromCreate(
 	return results
 }
 
-// collateBatchResultsFromModify mirrors collateBatchResultsFromCreate
-// but copies the Modify request's NewQuantity / NewPrice into the
-// success result.
-func collateBatchResultsFromModify(
-	reqs []mixtypes.ModifyOrderRequest,
-	clientOids []string,
-	data batchOrderResp,
-	symbol string,
-) []mixtypes.BatchOrderResult {
-	var results []mixtypes.BatchOrderResult = make([]mixtypes.BatchOrderResult, len(reqs))
-	var byClientOid map[string]*mixtypes.BatchOrderResult = map[string]*mixtypes.BatchOrderResult{}
-	var positional []*mixtypes.BatchOrderResult
-	var i int
-	for i = 0; i < len(reqs); i++ {
-		results[i] = mixtypes.BatchOrderResult{ClientOrderID: clientOids[i]}
-		if clientOids[i] != "" {
-			byClientOid[clientOids[i]] = &results[i]
-		} else {
-			positional = append(positional, &results[i])
-		}
-	}
-
-	var ok batchOrderSuccess
-	var idx int = 0
-	for _, ok = range data.SuccessList {
-		var target *mixtypes.BatchOrderResult
-		if ok.ClientOid != "" {
-			target = byClientOid[ok.ClientOid]
-		}
-		if target == nil && idx < len(positional) {
-			target = positional[idx]
-			idx++
-		}
-		var info *mixtypes.OrderInfo = &mixtypes.OrderInfo{
-			OrderID:       ok.OrderID,
-			ClientOrderID: chooseClientOid(ok.ClientOid, ""),
-			Symbol:        symbol,
-			Status:        roottypes.OrderStatusLive,
-		}
-		if target == nil {
-			results = append(results, mixtypes.BatchOrderResult{
-				ClientOrderID: ok.ClientOid,
-				Order:         info,
-			})
-			continue
-		}
-		info.ClientOrderID = chooseClientOid(ok.ClientOid, target.ClientOrderID)
-		var reqIdx int
-		reqIdx, _ = findRequestIndex(nil, results, target)
-		if reqIdx >= 0 && reqIdx < len(reqs) {
-			info.Quantity = reqs[reqIdx].NewQuantity
-			info.Price = reqs[reqIdx].NewPrice
-		}
-		target.Order = info
-	}
-
-	var fail batchOrderFailure
-	idx = 0
-	for _, fail = range data.FailureList {
-		var target *mixtypes.BatchOrderResult
-		if fail.ClientOid != "" {
-			target = byClientOid[fail.ClientOid]
-		}
-		if target == nil && idx < len(positional) {
-			target = positional[idx]
-			idx++
-		}
-		var perRowErr error = bitget.NewError(
-			bitget.MapBitgetCode(fail.ErrorCode, fail.ErrorMsg),
-			fail.ErrorCode,
-			fail.ErrorMsg,
-			nil,
-		)
-		if target == nil {
-			results = append(results, mixtypes.BatchOrderResult{
-				ClientOrderID: fail.ClientOid,
-				Err:           perRowErr,
-			})
-			continue
-		}
-		target.Err = perRowErr
-	}
-
-	return results
-}
+// collateBatchResultsFromModify previously mapped batch-modify-order
+// responses; removed alongside ModifyBatchOrders in v1.1.0 because
+// the endpoint does not exist on Bitget V2. Restore from git history
+// once the venue ships a real batch-modify endpoint (or when the
+// SDK adds the V3/UTA trade client).
 
 // collateBatchResultsFromCancel pairs cancel-batch outcomes with the
 // originating CancelOrderRequest rows. Cancellation responses do not
