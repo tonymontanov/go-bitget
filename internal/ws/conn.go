@@ -117,7 +117,8 @@ type Config struct {
 	// PingInterval — interval between application-level "ping" frames.
 	// Bitget's server-side timeout is 30s; recommended 20-25s.
 	PingInterval time.Duration
-	// LoginTimeout — how long to wait for the login ack. Default 5s.
+	// LoginTimeout — how long to wait for the login ack. Default
+	// 15s (see root Config.WS.LoginTimeout for rationale).
 	LoginTimeout time.Duration
 	// ReconnectInitialBackoff — first sleep after a connection failure.
 	ReconnectInitialBackoff time.Duration
@@ -426,6 +427,15 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 		var body []byte
 		msgType, body, err = socket.ReadMessage()
 		if err != nil {
+			// Wrap with timeout context so operators can distinguish
+			// "login was rejected" from "ack never arrived in time".
+			// The latter typically points at overlay-network RTT
+			// (Cloudflare WARP / VPN), not a credentials problem —
+			// see config.WsConfig.LoginTimeout for the knob to raise.
+			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+				return fmt.Errorf("login ack not received within %s (raise WS.LoginTimeout or check network/VPN routing): %w",
+					c.cfg.LoginTimeout, err)
+			}
 			return err
 		}
 		if msgType != websocket.TextMessage {

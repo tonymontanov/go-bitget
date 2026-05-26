@@ -123,7 +123,12 @@ type WsConfig struct {
 	// 20s leaves comfortable margin.
 	PingInterval time.Duration
 
-	// LoginTimeout — how long to wait for the login ack. Default 5s.
+	// LoginTimeout — how long to wait for the login ack on the
+	// private WS endpoint. Default 15s. The previous default (5s)
+	// was tight on overlay networks (Cloudflare WARP / VPN
+	// split-tunnels routing through 198.18.0.0/15) where the RTT
+	// to ws.bitget.com is regularly 2-3s; 15s leaves room for a
+	// retry without false-positive reconnects.
 	LoginTimeout time.Duration
 
 	// ReconnectInitialBackoff — first sleep after a connection failure.
@@ -172,7 +177,7 @@ func DefaultConfig() Config {
 			ReadTimeout:             35 * time.Second,
 			WriteTimeout:            5 * time.Second,
 			PingInterval:            20 * time.Second,
-			LoginTimeout:            5 * time.Second,
+			LoginTimeout:            15 * time.Second,
 			ReconnectInitialBackoff: 200 * time.Millisecond,
 			ReconnectMaxBackoff:     10 * time.Second,
 			ReconnectJitter:         0.2,

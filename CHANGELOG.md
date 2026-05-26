@@ -4,6 +4,33 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.0.1 — 2026-05-26
+
+### Changed
+
+- **Default `WS.LoginTimeout` raised from 5s to 15s.** Production
+  logs from operators routing through Cloudflare WARP / VPN
+  split-tunnels (where the egress IP lands in 198.18.0.0/15 TEST-NET-2
+  ranges) showed the private-WS login ack regularly arriving
+  6-9 seconds after the request. The previous 5s default produced
+  pathological reconnect loops: every attempt timed out at the read
+  deadline, the supervisor reconnected, login was re-sent, timed out
+  again, and so on. 15s leaves headroom for one full RTT-doubling on
+  overlay networks without slowing down direct-route clients (where
+  the ack lands in <300ms). The field is still individually
+  configurable.
+
+### Fixed
+
+- **Login-timeout error message clarified.** Previously a login
+  read-deadline expiration surfaced as `login: read tcp ...: i/o
+  timeout`, indistinguishable from a generic socket failure.
+  `performLogin` now detects `net.Error.Timeout() == true` and wraps
+  the error with explicit `login ack not received within <duration>
+  (raise WS.LoginTimeout or check network/VPN routing)`, so operators
+  can immediately tell that the problem is overlay-network latency,
+  not bad credentials.
+
 ## v1.0.0 — 2026-05-26
 
 First production-grade release of the SDK. The **MIX (USDT-margined
