@@ -118,7 +118,7 @@ type Config struct {
 	// Bitget's server-side timeout is 30s; recommended 20-25s.
 	PingInterval time.Duration
 	// LoginTimeout — how long to wait for the login ack. Default
-	// 15s (see root Config.WS.LoginTimeout for rationale).
+	// 30s (see root Config.WS.LoginTimeout for rationale).
 	LoginTimeout time.Duration
 	// ReconnectInitialBackoff — first sleep after a connection failure.
 	ReconnectInitialBackoff time.Duration
@@ -414,6 +414,16 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 	if err != nil {
 		return err
 	}
+	// Diagnostic log: surface the exact timestamp length (10 = seconds,
+	// 13 = milliseconds) and signature length so operators can verify
+	// from the application log that this binary actually contains the
+	// v1.0.2+ fix without having to inspect the wire. Credentials and
+	// the sign value itself are NOT logged.
+	c.logger.Info("ws: sending login",
+		bglog.Int("ts_len", int64(len(ts))),
+		bglog.Int("sig_len", int64(len(signature))),
+		bglog.Int("expected_ts_len", 10),
+	)
 	if err = c.writeFrame(socket, websocket.TextMessage, raw); err != nil {
 		return err
 	}
@@ -426,6 +436,7 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 	// login ack on a busy connection. We do NOT read forever — the
 	// surrounding deadline above guarantees progress.
 	var i int
+	var sawAnyFrame bool
 	for i = 0; i < 10; i++ {
 		var msgType int
 		var body []byte
@@ -436,24 +447,46 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 			// The latter typically points at overlay-network RTT
 			// (Cloudflare WARP / VPN), not a credentials problem —
 			// see config.WsConfig.LoginTimeout for the knob to raise.
+			//
+			// If we never saw a single frame from the server between
+			// "ws: connected" and the deadline, this is the smoking
+			// gun for an overlay-network drop: TLS handshake completes
+			// but post-upgrade text frames never arrive. Surface that
+			// explicitly so operators don't waste time on credentials.
 			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+				if !sawAnyFrame {
+					return fmt.Errorf("login ack not received within %s and no frames seen since connect (overlay-network likely dropping post-upgrade frames; raise WS.LoginTimeout or bypass VPN/WARP): %w",
+						c.cfg.LoginTimeout, err)
+				}
 				return fmt.Errorf("login ack not received within %s (raise WS.LoginTimeout or check network/VPN routing): %w",
 					c.cfg.LoginTimeout, err)
 			}
 			return err
 		}
+		sawAnyFrame = true
 		if msgType != websocket.TextMessage {
 			continue
 		}
-		// Plain-text "pong" before login ack — skip.
+		// Plain-text "pong" before login ack — skip. Worth logging once
+		// so operators see SOMETHING came back during the wait: an
+		// unsolicited pong proves the post-upgrade direction is alive
+		// and narrows the hunt to the login frame round-trip itself.
 		if bytes.Equal(body, pongPayload) {
+			c.logger.Debug("ws: pong received during login wait")
 			continue
 		}
 		var env Envelope
 		if err = codec.Unmarshal(body, &env); err != nil {
+			c.logger.Debug("ws: unparseable frame during login wait",
+				bglog.Int("body_len", int64(len(body))))
 			continue
 		}
 		if env.Event != "login" && env.Event != "error" {
+			// Push or subscribe-ack from a prior connection state —
+			// surface in debug so the wait isn't a black box.
+			c.logger.Debug("ws: non-login frame during login wait",
+				bglog.Str("event", env.Event),
+				bglog.Str("code", env.Code))
 			continue
 		}
 		if env.Event == "login" && env.Code == "0" {

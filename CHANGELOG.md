@@ -4,6 +4,35 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.0.3 — 2026-05-26
+
+### Changed
+
+- **Default `WS.LoginTimeout` raised from 15s to 30s.** Even after the
+  v1.0.2 seconds-precision fix, a small fraction of WARP/VPN sessions
+  observed a slower-than-expected login ack (likely first-frame
+  buffering through the overlay). 30s is still safe — it only delays
+  the reconnect cascade on a genuinely dead route, and the normal
+  case lands in <300ms.
+
+### Added
+
+- **Diagnostic log on every login op.** `ws: sending login` now
+  records the timestamp string length (10 = seconds = v1.0.2+,
+  13 = milliseconds = pre-v1.0.2 binary), the signature length, and
+  the expected timestamp length. Operators who suspect the
+  application binary is stale can grep one log line to confirm the
+  fix is actually present — no need to inspect the wire.
+- **Diagnostic logs during the login-ack wait.** Pong frames,
+  unparseable frames, and non-login envelopes that arrive between
+  the login op and the ack are now traced at debug level. When the
+  read deadline expires WITHOUT a single frame seen since connect,
+  the wrapped error explicitly calls out the overlay-network drop
+  case ("no frames seen since connect ... overlay-network likely
+  dropping post-upgrade frames"). This separates "Bitget rejected
+  the login" (frames arrive) from "Cloudflare WARP ate the login"
+  (no frames arrive) without operator help.
+
 ## v1.0.2 — 2026-05-26
 
 ### Fixed

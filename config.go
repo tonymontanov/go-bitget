@@ -177,7 +177,7 @@ func DefaultConfig() Config {
 			ReadTimeout:             35 * time.Second,
 			WriteTimeout:            5 * time.Second,
 			PingInterval:            20 * time.Second,
-			LoginTimeout:            15 * time.Second,
+			LoginTimeout:            30 * time.Second,
 			ReconnectInitialBackoff: 200 * time.Millisecond,
 			ReconnectMaxBackoff:     10 * time.Second,
 			ReconnectJitter:         0.2,
