@@ -79,6 +79,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -478,32 +479,50 @@ func (t *TradingClient) CreateBatchOrders(ctx context.Context, reqs []mixtypes.C
 	return collateBatchResultsFromCreate(reqs, clientOids, data, symbol), nil
 }
 
+// modifyFanOutConcurrency caps the in-flight ModifyOrder requests
+// when ModifyBatchOrders fans out client-side. Picked at 5 to stay
+// well under the documented Bitget V2 modify-order rate limit
+// (10 req/s per UID at the time of writing) so a 50-row batch
+// completes in ~5 RTT-waves without burning the modify budget for
+// every other strategy on the same key.
+const modifyFanOutConcurrency = 5
+
 /*
-ModifyBatchOrders is a no-op stub on Bitget V2: the venue has never
-shipped a `/api/v2/mix/order/batch-modify-order` endpoint. The URL
-returns HTTP 404 + code=40404 "Request URL NOT FOUND" (verified in
-production logs and against the official spec
-https://www.bitget.com/api-doc/contract/trade/Modify-Order, which
-lists batch-place / batch-cancel only — not batch-modify). The
-batch-modify capability lives on the V3 (UTA) trade API.
+ModifyBatchOrders amends a batch of MIX orders.
 
-Rather than serialise a request that we KNOW will round-trip to a
-404, this method returns an explicit ErrorKindInvalidRequest with
-remediation hints so the desk-side connector can fall back cleanly
-(loop of single ModifyOrder calls, or cancel-then-place). The
-behavioural contract from the caller's perspective is "this batch
-of modifications failed end-to-end" — same shape it would see if
-the server actually did return 40404, but two RTTs faster.
+WIRE-LEVEL TRUTH:
+Bitget V2 has never shipped /api/v2/mix/order/batch-modify-order
+(the URL returns HTTP 404 + code=40404 "Request URL NOT FOUND";
+official spec https://www.bitget.com/api-doc/contract/trade/Modify-Order
+lists batch-place / batch-cancel only — never batch-modify). A
+true wire-level batch-modify lives on Bitget's V3 / UTA trade API
+(POST /api/v3/trade/batch-modify-order, see the v3 client in
+tiagosiebler/bitget-api).
 
-When/if Bitget extends V2 with a real batch-modify endpoint we'll
-restore the wire body + resp parsing. For now keeping this method
-on the surface (rather than deleting it) means the desk-core
-ConnectorWrapper interface stays stable across the V2/V3 cut-over.
+CLIENT-SIDE FAN-OUT:
+Rather than refuse the call (which forced every caller to write
+its own loop) the SDK fans the batch out to single ModifyOrder
+RPCs with bounded concurrency (modifyFanOutConcurrency) and
+collects per-row results in input order. The returned
+BatchOrderResult slice is shaped IDENTICALLY to the wire response
+shape used by CreateBatchOrders / CancelBatchOrders:
+
+  - results[i].Order != nil, results[i].Err == nil → row i succeeded;
+  - results[i].Order == nil, results[i].Err != nil → row i failed;
+  - results[i].ClientOrderID echoes the request (helpful when the
+    caller didn't supply NewClientOrderID and wants to map results
+    back to its idempotency cache by the EXISTING clientOid).
+
+The function-level error is non-nil ONLY for fail-fast pre-flight
+problems (empty batch / heterogeneous symbols / per-row validation).
+Once we start firing requests every result lives inside the slice.
+
+WHY NOT V3 YET:
+The user has explicitly asked us to stay on V2 connector for now;
+when we ship the V3 trade client this method will switch to a real
+single-RPC batch-modify with the same external contract.
 */
-func (t *TradingClient) ModifyBatchOrders(_ context.Context, reqs []mixtypes.ModifyOrderRequest) ([]mixtypes.BatchOrderResult, error) {
-	// Validate inputs anyway — gives callers consistent errors when
-	// they pass garbage, and surfaces the unsupported-by-venue path
-	// cleanly when inputs are well-formed.
+func (t *TradingClient) ModifyBatchOrders(ctx context.Context, reqs []mixtypes.ModifyOrderRequest) ([]mixtypes.BatchOrderResult, error) {
 	var err error
 	if err = validateBatchSize("ModifyBatchOrders", len(reqs)); err != nil {
 		return nil, err
@@ -512,19 +531,50 @@ func (t *TradingClient) ModifyBatchOrders(_ context.Context, reqs []mixtypes.Mod
 	var i int
 	for i = 0; i < len(reqs); i++ {
 		if err = validateModifyOrderRequest(reqs[i]); err != nil {
-			return nil, bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading.ModifyBatchOrders["+strconv.Itoa(i)+"]: "+err.Error(), nil)
+			return nil, bitget.NewError(bitget.ErrorKindInvalidRequest, "",
+				"mix.Trading.ModifyBatchOrders["+strconv.Itoa(i)+"]: "+err.Error(), nil)
 		}
 		if reqs[i].Symbol != symbol {
-			return nil, bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading.ModifyBatchOrders: all rows must share the same symbol (row 0="+symbol+", row "+strconv.Itoa(i)+"="+reqs[i].Symbol+")", nil)
+			return nil, bitget.NewError(bitget.ErrorKindInvalidRequest, "",
+				"mix.Trading.ModifyBatchOrders: all rows must share the same symbol (row 0="+
+					symbol+", row "+strconv.Itoa(i)+"="+reqs[i].Symbol+")", nil)
 		}
 	}
-	return nil, bitget.NewError(
-		bitget.ErrorKindInvalidRequest, "",
-		"mix.Trading.ModifyBatchOrders: Bitget V2 does not support batch order modification "+
-			"(POST /api/v2/mix/order/batch-modify-order returns HTTP 404 / code=40404 in production); "+
-			"call ModifyOrder per row, or use CancelBatchOrders + CreateBatchOrders",
-		nil,
-	)
+
+	var results []mixtypes.BatchOrderResult = make([]mixtypes.BatchOrderResult, len(reqs))
+	var sem chan struct{} = make(chan struct{}, modifyFanOutConcurrency)
+	var wg sync.WaitGroup
+
+	for i = 0; i < len(reqs); i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			// Fail-fast on a cancelled context: don't burn the
+			// modify-budget on requests we know are already moot.
+			if cerr := ctx.Err(); cerr != nil {
+				results[idx] = mixtypes.BatchOrderResult{
+					ClientOrderID: reqs[idx].ClientOrderID,
+					Err:           bitget.NewError(bitget.ErrorKindNetwork, "", "mix.Trading.ModifyBatchOrders: context cancelled before row "+strconv.Itoa(idx), cerr),
+				}
+				return
+			}
+
+			var info mixtypes.OrderInfo
+			var rerr error
+			info, rerr = t.ModifyOrder(ctx, reqs[idx])
+			results[idx].ClientOrderID = reqs[idx].ClientOrderID
+			if rerr != nil {
+				results[idx].Err = rerr
+				return
+			}
+			results[idx].Order = &info
+		}(i)
+	}
+	wg.Wait()
+	return results, nil
 }
 
 // batchCancelOrderBody is the wire payload for batch-cancel-orders.

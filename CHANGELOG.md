@@ -4,6 +4,67 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.2.0 — 2026-05-26
+
+### Fixed (high-impact)
+
+- **Private `orders` / `positions` channels now subscribe with
+  `instId="default"`, not the symbol.** Bitget V2 ONLY accepts
+  `default` for these channels; any actual symbol is rejected with
+  `code=30001 "instType:USDT-FUTURES,channel:positions,instId:<sym>,
+  precision:null doesn't exist"` (regression seen in PARTIUSDT field
+  log under v1.0.4 right after the new login fix surfaced this older
+  subscribe bug). Confirmed against
+  https://www.bitget.com/api-doc/classic/best-practices and
+  `tiagosiebler/bitget-api` (`coin: string = 'default'`).
+
+  The per-symbol public API (`WatchOrders(ctx, symbol, h, eh)` /
+  `WatchPositions(ctx, symbol, h, eh)`) is preserved verbatim — the
+  SDK now subscribes globally and filters rows client-side inside
+  `handleOrdersFrame` / `handlePositionsFrame` by `row.InstID ==
+  symbol`. Pass `symbol="default"` to receive every row unfiltered
+  (useful for desks fanning out by symbol on their own).
+
+### Added
+
+- **`ModifyBatchOrders` is now a real batch-modify** (was a
+  fail-fast stub in v1.1.0). The SDK fans the batch out to single
+  `ModifyOrder` RPCs with bounded concurrency
+  (`modifyFanOutConcurrency = 5`) and returns a per-row
+  `BatchOrderResult` slice in input order — same external contract
+  as `CreateBatchOrders` / `CancelBatchOrders`. The wire-level
+  endpoint `/api/v2/mix/order/batch-modify-order` still does not
+  exist on Bitget V2 (only on V3 / UTA, see
+  `/api/v3/trade/batch-modify-order` in `tiagosiebler/bitget-api`),
+  but callers no longer need to write the loop themselves. The V2/V3
+  cutover will swap the implementation while preserving the
+  contract.
+
+  Per-row failure semantics:
+  - `results[i].Order != nil` → row succeeded;
+  - `results[i].Err != nil` → row failed (typed `*bitget.Error`,
+    works with `IsRateLimit` / `IsExchange` / etc. for retry
+    decisions);
+  - `results[i].ClientOrderID` echoes the request's existing
+    clientOid (helpful for mapping results back to the caller's
+    idempotency cache).
+  - The function-level error is non-nil ONLY for pre-flight
+    problems (empty batch, heterogeneous symbols, per-row
+    validation).
+
+- Tests:
+  - `TestContract_ModifyBatchOrders_FanOutSucceeds` — all-row
+    success path + input-order preservation.
+  - `TestContract_ModifyBatchOrders_PerRowFailureIsolated` — one
+    bad row doesn't poison its neighbours.
+  - `TestContract_WatchPositions_FilterDropsForeignSymbol` — locks
+    down the per-symbol filter.
+  - `TestContract_WatchPositions_DefaultSymbolReceivesAll` —
+    unfiltered opt-out.
+  - `TestContract_WatchOrders_FieldMapping` and
+    `TestContract_WatchPositions_FieldMapping` updated to assert
+    `instId="default"` on the wire.
+
 ## v1.1.0 — 2026-05-26
 
 ### Fixed (high-impact)

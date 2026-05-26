@@ -85,14 +85,19 @@ func TestContract_WatchOrders_FieldMapping(t *testing.T) {
 
 	select {
 	case sub := <-mock.subs:
-		if sub["channel"] != "orders" || sub["instId"] != "BTCUSDT" {
-			t.Fatalf("unexpected subscribe arg: %#v", sub)
+		// CRITICAL CONTRACT (regressed twice already):
+		// Bitget V2 private orders channel rejects per-symbol
+		// subscriptions with code=30001. The SDK MUST always
+		// subscribe with instId="default"; per-symbol filtering
+		// happens client-side inside handleOrdersFrame.
+		if sub["channel"] != "orders" || sub["instId"] != "default" {
+			t.Fatalf("unexpected subscribe arg (expected instId=default): %#v", sub)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("subscribe not received")
 	}
 
-	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "orders", "BTCUSDT",
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "orders", "default",
 		[]map[string]any{{
 			"instId":        "BTCUSDT",
 			"orderId":       "ord-1",
@@ -176,14 +181,17 @@ func TestContract_WatchPositions_FieldMapping(t *testing.T) {
 
 	select {
 	case sub := <-mock.subs:
-		if sub["channel"] != "positions" || sub["instId"] != "BTCUSDT" {
-			t.Fatalf("unexpected subscribe arg: %#v", sub)
+		// CRITICAL CONTRACT (see WatchOrders test for the long story).
+		// Bitget V2 positions channel ONLY accepts instId="default";
+		// per-symbol subscribe yields code=30001.
+		if sub["channel"] != "positions" || sub["instId"] != "default" {
+			t.Fatalf("unexpected subscribe arg (expected instId=default): %#v", sub)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("subscribe not received")
 	}
 
-	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "BTCUSDT",
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
 		[]map[string]any{{
 			"instId":           "BTCUSDT",
 			"marginCoin":       "USDT",
@@ -231,6 +239,124 @@ func TestContract_WatchPositions_FieldMapping(t *testing.T) {
 	if p.CreatedAtMs != 1700000000000 || p.UpdatedAtMs != 1700000000050 {
 		t.Fatalf("ts: %d/%d", p.CreatedAtMs, p.UpdatedAtMs)
 	}
+}
+
+// TestContract_WatchPositions_FilterDropsForeignSymbol locks down
+// the symbol-filter behaviour: when the caller subscribes for
+// "BTCUSDT" the SDK still subscribes globally with instId="default",
+// but rows for an unrelated symbol must NOT reach the user handler.
+// This is the per-symbol contract that the v1.0 wire bug
+// accidentally satisfied (server filtered by rejecting subscribe).
+func TestContract_WatchPositions_FilterDropsForeignSymbol(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.PositionInfo
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchPositions(ctx, "BTCUSDT",
+		func(p mixtypes.PositionInfo) {
+			gotMu.Lock()
+			got = append(got, p)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchPositions: %v", err)
+	}
+	<-mock.subs
+
+	// One push carrying TWO rows: the requested symbol and a
+	// foreign one. Only the requested one should reach the handler.
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
+		[]map[string]any{
+			{
+				"instId":     "ETHUSDT",
+				"marginCoin": "USDT",
+				"holdSide":   "long",
+				"marginMode": "crossed",
+				"total":      "1",
+				"available":  "1",
+				"frozen":     "0",
+				"leverage":   "5",
+			},
+			{
+				"instId":     "BTCUSDT",
+				"marginCoin": "USDT",
+				"holdSide":   "long",
+				"marginMode": "crossed",
+				"total":      "0.1",
+				"available":  "0.1",
+				"frozen":     "0",
+				"leverage":   "5",
+			},
+		}, 1700000000050)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) >= 1
+	})
+	gotMu.Lock()
+	defer gotMu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 row (BTCUSDT only), got %d: %#v", len(got), got)
+	}
+	if got[0].Symbol != "BTCUSDT" {
+		t.Fatalf("expected BTCUSDT, got %q (filter regression)", got[0].Symbol)
+	}
+}
+
+// TestContract_WatchPositions_DefaultSymbolReceivesAll covers the
+// caller-friendly opt-out: pass "default" → no filter, all rows.
+func TestContract_WatchPositions_DefaultSymbolReceivesAll(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.PositionInfo
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchPositions(ctx, "default",
+		func(p mixtypes.PositionInfo) {
+			gotMu.Lock()
+			got = append(got, p)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchPositions: %v", err)
+	}
+	<-mock.subs
+
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
+		[]map[string]any{
+			{"instId": "ETHUSDT", "marginCoin": "USDT", "holdSide": "long", "marginMode": "crossed", "total": "1", "available": "1", "frozen": "0", "leverage": "5"},
+			{"instId": "BTCUSDT", "marginCoin": "USDT", "holdSide": "long", "marginMode": "crossed", "total": "0.1", "available": "0.1", "frozen": "0", "leverage": "5"},
+		}, 1700000000050)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) == 2
+	})
 }
 
 // ---------------------------------------------------------------------

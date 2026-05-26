@@ -18,11 +18,22 @@ DESIGN:
     subscribe op.
 
   - Channel wire shape: instType=ProductType (USDT-FUTURES / ...),
-    channel=orders|positions, instId=symbol. Bitget also accepts
-    instId="default" as a wildcard meaning "every symbol the account
-    holds"; v1.0 sticks to per-symbol subscriptions because the desk
-    routes by symbol anyway. The "account" channel keys off
-    coin=marginCoin instead of instId.
+    channel=orders|positions, instId="default" — Bitget V2 REQUIRES
+    "default" for the orders / positions / fill / plan-order private
+    channels. Passing the actual symbol is rejected with code=30001
+    "...doesn't exist" (regression seen in PARTIUSDT field log under
+    v1.0.4: the new login fix surfaced this older subscribe bug).
+    Confirmed via https://www.bitget.com/api-doc/classic/best-practices
+    and tiagosiebler/bitget-api (`coin: string = 'default'`).
+
+    The SDK preserves the per-symbol public API (callers pass the
+    symbol they care about) by filtering rows in the dispatcher:
+    the "default" subscription delivers EVERY symbol the account
+    holds, and the dispatcher invokes the user handler only for
+    rows whose row.InstID matches the requested symbol. Pass
+    symbol="default" to receive every row unfiltered. The "account"
+    channel keys off coin=marginCoin instead of instId — separate
+    rule, untouched by this change.
 
   - Reconnect / relogin / resubscribe is fully handled by ws.Conn —
     the StreamClient never observes a transport reset.
@@ -69,6 +80,11 @@ const (
 	channelPositions = "positions"
 	channelAccount   = "account"
 )
+
+// instIDDefaultPrivate is the only accepted instId value on Bitget
+// V2 private orders / positions / fill / plan-order channels.
+// Passing any actual symbol yields code=30001 "...doesn't exist".
+const instIDDefaultPrivate = "default"
 
 // privateConnState bundles every field that needs locking around the
 // private connection lifecycle. StreamClient embeds it under its own
@@ -160,14 +176,20 @@ func (s *StreamClient) detachPrivateOnContextDone(ctx context.Context, arg ws.Su
 // WatchOrders.
 // ---------------------------------------------------------------------
 
-// WatchOrders subscribes to the "orders" private channel. The handler
-// is invoked once per order push (Bitget fans state transitions out
-// per-order; the SDK preserves that granularity).
+// WatchOrders subscribes to the "orders" private channel.
 //
-// symbol scopes the subscription to one instrument — Bitget echoes
-// only events for that instId. Pass "default" to receive every order
-// the account holds (the SDK surfaces it verbatim, no client-side
-// filtering).
+// The handler is invoked once per order row whose InstID matches
+// `symbol` (Bitget batches state transitions into a single push and
+// the SDK fans them out). Pass `symbol="default"` (or the empty
+// string) to receive every row unfiltered — useful for desks that
+// fan out by symbol on their own.
+//
+// IMPORTANT:
+// On the wire the SDK always subscribes with instId="default":
+// Bitget V2 has no per-symbol orders subscription (returns code=30001
+// "instId:<sym> doesn't exist"). The per-symbol semantics callers
+// expect are preserved client-side via the InstID filter inside
+// handleOrdersFrame.
 func (s *StreamClient) WatchOrders(
 	ctx context.Context,
 	symbol string,
@@ -188,15 +210,22 @@ func (s *StreamClient) WatchOrders(
 		return err
 	}
 
+	// Capture the caller's symbol filter into the closure; "default"
+	// (and the empty string, defensively) means "no filter".
+	var filter string = symbol
+	if filter == instIDDefaultPrivate {
+		filter = ""
+	}
+
 	var arg ws.SubscriptionArg = ws.SubscriptionArg{
 		InstType: string(s.c.productType),
 		Channel:  channelOrders,
-		InstID:   symbol,
+		InstID:   instIDDefaultPrivate,
 	}
 	var sub *ws.Subscription = &ws.Subscription{
 		Arg: arg,
 		Handler: func(_ ws.SubscriptionArg, _ string, payload []byte, _ int64, _ int64) {
-			s.handleOrdersFrame(payload, handler, errHandler)
+			s.handleOrdersFrame(payload, filter, handler, errHandler)
 		},
 	}
 	if err = conn.Subscribe(sub); err != nil {
@@ -210,11 +239,19 @@ func (s *StreamClient) WatchOrders(
 // WatchPositions.
 // ---------------------------------------------------------------------
 
-// WatchPositions subscribes to the "positions" private channel. The
-// handler is invoked once per position push.
+// WatchPositions subscribes to the "positions" private channel.
 //
-// symbol scopes the subscription. "default" yields every active
-// position on the account.
+// The handler is invoked once per position row whose InstID matches
+// `symbol`. Pass `symbol="default"` (or the empty string) to receive
+// every position on the account.
+//
+// IMPORTANT:
+// On the wire the SDK always subscribes with instId="default":
+// Bitget V2's positions channel has no per-symbol mode (returns
+// code=30001 "instId:<sym> doesn't exist"; per Bitget Best Practices
+// guide the only accepted instId is "default"). The per-symbol
+// semantics callers expect are preserved client-side via the InstID
+// filter inside handlePositionsFrame.
 func (s *StreamClient) WatchPositions(
 	ctx context.Context,
 	symbol string,
@@ -235,15 +272,20 @@ func (s *StreamClient) WatchPositions(
 		return err
 	}
 
+	var filter string = symbol
+	if filter == instIDDefaultPrivate {
+		filter = ""
+	}
+
 	var arg ws.SubscriptionArg = ws.SubscriptionArg{
 		InstType: string(s.c.productType),
 		Channel:  channelPositions,
-		InstID:   symbol,
+		InstID:   instIDDefaultPrivate,
 	}
 	var sub *ws.Subscription = &ws.Subscription{
 		Arg: arg,
 		Handler: func(_ ws.SubscriptionArg, _ string, payload []byte, _ int64, _ int64) {
-			s.handlePositionsFrame(payload, handler, errHandler)
+			s.handlePositionsFrame(payload, filter, handler, errHandler)
 		},
 	}
 	if err = conn.Subscribe(sub); err != nil {
@@ -317,8 +359,15 @@ func (s *StreamClient) WatchAccount(
 
 // handleOrdersFrame parses one "orders" channel frame and fans the
 // per-order rows out to the user handler.
+//
+// symbolFilter — when non-empty, only rows with row.InstID ==
+// symbolFilter are surfaced. Empty string disables filtering (used
+// for symbol="default" callers that want every order on the account).
+// The filter runs BEFORE convertWSOrderRow so we don't pay the
+// decimal-parse cost for irrelevant rows on multi-symbol accounts.
 func (s *StreamClient) handleOrdersFrame(
 	payload []byte,
+	symbolFilter string,
 	handler func(mixtypes.OrderInfo),
 	errHandler func(error),
 ) {
@@ -332,6 +381,9 @@ func (s *StreamClient) handleOrdersFrame(
 	}
 	var i int
 	for i = 0; i < len(rows); i++ {
+		if symbolFilter != "" && rows[i].InstID != symbolFilter {
+			continue
+		}
 		var info mixtypes.OrderInfo
 		var err error
 		info, err = convertWSOrderRow(rows[i])
@@ -344,8 +396,10 @@ func (s *StreamClient) handleOrdersFrame(
 }
 
 // handlePositionsFrame parses one "positions" channel frame.
+// See handleOrdersFrame for symbolFilter semantics.
 func (s *StreamClient) handlePositionsFrame(
 	payload []byte,
+	symbolFilter string,
 	handler func(mixtypes.PositionInfo),
 	errHandler func(error),
 ) {
@@ -359,6 +413,9 @@ func (s *StreamClient) handlePositionsFrame(
 	}
 	var i int
 	for i = 0; i < len(rows); i++ {
+		if symbolFilter != "" && rows[i].InstID != symbolFilter {
+			continue
+		}
 		var info mixtypes.PositionInfo
 		var err error
 		info, err = convertWSPositionRow(rows[i])

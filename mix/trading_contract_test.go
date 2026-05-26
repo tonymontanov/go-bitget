@@ -28,6 +28,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -607,41 +608,100 @@ func TestContract_CreateBatchOrders_TooLarge(t *testing.T) {
 // ModifyBatchOrders.
 // ---------------------------------------------------------------------
 
-// TestContract_ModifyBatchOrders_NotSupportedByVenue documents the
-// fact that Bitget V2 has never shipped a batch-modify-order
-// endpoint for MIX (the URL returns HTTP 404 / code=40404 in
-// production; verified in PARTIUSDT field session). The SDK no
-// longer round-trips a doomed request — it fails fast with a
-// typed ErrorKindInvalidRequest carrying remediation hints.
-func TestContract_ModifyBatchOrders_NotSupportedByVenue(t *testing.T) {
+// TestContract_ModifyBatchOrders_FanOutSucceeds covers the
+// client-side fan-out: the SDK fans the batch out to single
+// ModifyOrder RPCs (because Bitget V2 has no native batch-modify),
+// preserves input order, and returns one BatchOrderResult per row
+// with the venue's per-row outcome.
+func TestContract_ModifyBatchOrders_FanOutSucceeds(t *testing.T) {
 	t.Parallel()
+	const fixture = `{
+		"code":"00000","msg":"success","requestTime":0,
+		"data":{"orderId":"NEW-X","clientOid":"new-X"}
+	}`
 	var client *bitget.Client
-	// No mock route registered for batch-modify — if the SDK
-	// regresses and tries to issue the HTTP call the test server
-	// will panic with "no fixture for path".
-	_, client = mockBitget(t, map[string]string{}, nil)
+	_, client = mockBitget(t, map[string]string{
+		"/api/v2/mix/order/modify-order": fixture,
+	}, nil)
 
-	var _, err = mixOf(client).Trading().ModifyBatchOrders(context.Background(), []mixtypes.ModifyOrderRequest{
-		{Symbol: "BTCUSDT", OrderID: "OLD-1", ClientOrderID: "c-1", NewPrice: decimal.NewFromInt(50100)},
-	})
-	if err == nil {
-		t.Fatal("expected ErrorKindInvalidRequest (Bitget V2 has no batch-modify endpoint)")
+	var reqs []mixtypes.ModifyOrderRequest = []mixtypes.ModifyOrderRequest{
+		{Symbol: "BTCUSDT", OrderID: "OLD-1", ClientOrderID: "c-1", NewClientOrderID: "n-1", NewPrice: decimal.NewFromInt(50100)},
+		{Symbol: "BTCUSDT", OrderID: "OLD-2", ClientOrderID: "c-2", NewClientOrderID: "n-2", NewPrice: decimal.NewFromInt(50200)},
+		{Symbol: "BTCUSDT", OrderID: "OLD-3", ClientOrderID: "c-3", NewClientOrderID: "n-3", NewPrice: decimal.NewFromInt(50300)},
 	}
-	if !bitget.IsInvalidRequest(err) {
-		t.Fatalf("want ErrorKindInvalidRequest, got %v", err)
+	var results []mixtypes.BatchOrderResult
+	var err error
+	results, err = mixOf(client).Trading().ModifyBatchOrders(context.Background(), reqs)
+	if err != nil {
+		t.Fatalf("ModifyBatchOrders: %v", err)
 	}
-	// Sanity: error message must mention the V2 limitation so
-	// operators can grep their logs and know what to do.
-	var msg string = err.Error()
-	if !strings.Contains(msg, "batch order modification") {
-		t.Errorf("error message should explain the V2 limitation, got: %s", msg)
+	if len(results) != 3 {
+		t.Fatalf("len(results)=%d, want 3", len(results))
+	}
+	var i int
+	for i = 0; i < 3; i++ {
+		if results[i].Err != nil {
+			t.Errorf("results[%d].Err: %v", i, results[i].Err)
+		}
+		if results[i].Order == nil {
+			t.Errorf("results[%d].Order is nil", i)
+			continue
+		}
+		// Order preservation: the i-th result must echo the i-th
+		// request's existing ClientOrderID.
+		var wantClientOid string = "c-" + strconv.Itoa(i+1)
+		if results[i].ClientOrderID != wantClientOid {
+			t.Errorf("results[%d].ClientOrderID: %q, want %q (input order regression)", i, results[i].ClientOrderID, wantClientOid)
+		}
 	}
 }
 
-// TestContract_ModifyBatchOrders_StillValidatesInputs ensures input
-// validation runs even though the venue-call is stubbed out — empty
-// batches and per-row errors still surface as InvalidRequest, so
-// callers get the same fail-fast behaviour they had before.
+// TestContract_ModifyBatchOrders_PerRowFailureIsolated verifies
+// that a per-row failure does NOT abort the rest of the batch — the
+// failed row gets results[i].Err populated and other rows still go
+// through.
+func TestContract_ModifyBatchOrders_PerRowFailureIsolated(t *testing.T) {
+	t.Parallel()
+	// Mock that always returns success — the failure we exercise
+	// is purely client-side validation: row 1 has duplicate IDs.
+	const okFixture = `{
+		"code":"00000","msg":"success","requestTime":0,
+		"data":{"orderId":"NEW-X","clientOid":"new-X"}
+	}`
+	var client *bitget.Client
+	_, client = mockBitget(t, map[string]string{
+		"/api/v2/mix/order/modify-order": okFixture,
+	}, nil)
+
+	var reqs []mixtypes.ModifyOrderRequest = []mixtypes.ModifyOrderRequest{
+		{Symbol: "BTCUSDT", OrderID: "OLD-1", ClientOrderID: "c-1", NewClientOrderID: "n-1", NewPrice: decimal.NewFromInt(50100)},
+		// Duplicate IDs → SDK fails this row early without RTT.
+		{Symbol: "BTCUSDT", ClientOrderID: "c-2", NewClientOrderID: "c-2", NewPrice: decimal.NewFromInt(50200)},
+		{Symbol: "BTCUSDT", OrderID: "OLD-3", ClientOrderID: "c-3", NewClientOrderID: "n-3", NewPrice: decimal.NewFromInt(50300)},
+	}
+	var results []mixtypes.BatchOrderResult
+	var err error
+	results, err = mixOf(client).Trading().ModifyBatchOrders(context.Background(), reqs)
+	if err != nil {
+		t.Fatalf("ModifyBatchOrders: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("len(results)=%d, want 3", len(results))
+	}
+	if results[0].Err != nil || results[0].Order == nil {
+		t.Errorf("results[0]: expected success, got err=%v order=%v", results[0].Err, results[0].Order)
+	}
+	if results[1].Err == nil {
+		t.Errorf("results[1]: expected duplicate-clientOid error, got success")
+	}
+	if results[2].Err != nil || results[2].Order == nil {
+		t.Errorf("results[2]: expected success, got err=%v order=%v", results[2].Err, results[2].Order)
+	}
+}
+
+// TestContract_ModifyBatchOrders_StillValidatesInputs ensures the
+// pre-flight validation (empty batch / heterogeneous symbol) still
+// short-circuits with InvalidRequest before any wire call.
 func TestContract_ModifyBatchOrders_StillValidatesInputs(t *testing.T) {
 	t.Parallel()
 	var client *bitget.Client
