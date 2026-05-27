@@ -43,6 +43,7 @@ package mix
 
 import (
 	bitget "github.com/tonymontanov/go-bitget/v2"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
 )
 
@@ -180,10 +181,10 @@ func (c *Client) MarketData() *MarketDataClient { return c.marketData }
 func (c *Client) Stream() *StreamClient { return c.stream }
 
 // Internal shortcuts shared by sub-clients.
-func (c *Client) logger() bitget.Logger { return c.parent.Logger() }
-func (c *Client) rest() restDoer        { return c.parent.REST() }
-func (c *Client) config() bitget.Config { return c.parent.Config() }
-func (c *Client) signerEnabled() bool   { return c.parent.Signer().Enabled() }
+func (c *Client) logger() bitget.Logger   { return c.parent.Logger() }
+func (c *Client) rest() bgcommon.RestDoer { return c.parent.REST() }
+func (c *Client) config() bitget.Config   { return c.parent.Config() }
+func (c *Client) signerEnabled() bool     { return c.parent.Signer().Enabled() }
 
 // init registers the factory in the root package so that
 // bitget.Client.Mix() lazily returns *mix.Client. This allows users to

@@ -76,7 +76,7 @@ func newMarketDataClient(c *Client) *MarketDataClient {
 
 // contractRow mirrors one row of GET /api/v2/mix/market/contracts. Field
 // order follows the live Bitget V2 response; absent fields default to
-// "" and the SDK normalises them to zero via parseDecimalOrZero.
+// "" and the SDK normalises them to zero via bgcommon.ParseDecimalOrZero.
 type contractRow struct {
 	Symbol         string `json:"symbol"`
 	BaseCoin       string `json:"baseCoin"`
@@ -163,11 +163,11 @@ func convertContractRow(row contractRow, productType roottypes.ProductType) (mix
 	}
 
 	var err error
-	out.MinTradeNum, err = parseDecimalOrZero(row.MinTradeNum)
+	out.MinTradeNum, err = bgcommon.ParseDecimalOrZero(row.MinTradeNum)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse minTradeNum", err)
 	}
-	out.MinTradeUSDT, err = parseDecimalOrZero(row.MinTradeUSDT)
+	out.MinTradeUSDT, err = bgcommon.ParseDecimalOrZero(row.MinTradeUSDT)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse minTradeUSDT", err)
 	}
@@ -175,11 +175,11 @@ func convertContractRow(row contractRow, productType roottypes.ProductType) (mix
 	// Bitget reports precision (price / volume) as integer counts of
 	// decimal digits. tickSize / stepSize are derived from precision via
 	// 10^(-precision).
-	out.PricePrecision, err = parseIntOrZero(row.PricePlace)
+	out.PricePrecision, err = bgcommon.ParseIntOrZero(row.PricePlace)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse pricePlace", err)
 	}
-	out.SizePrecision, err = parseIntOrZero(row.VolumePlace)
+	out.SizePrecision, err = bgcommon.ParseIntOrZero(row.VolumePlace)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse volumePlace", err)
 	}
@@ -187,7 +187,7 @@ func convertContractRow(row contractRow, productType roottypes.ProductType) (mix
 	// The effective price tick equals priceEndStep * 10^(-pricePlace).
 	// Example: pricePlace=1, priceEndStep=5 → tick = 5 * 10^-1 = 0.5.
 	var priceEndStep int
-	priceEndStep, err = parseIntOrZero(row.PriceEndStep)
+	priceEndStep, err = bgcommon.ParseIntOrZero(row.PriceEndStep)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse priceEndStep", err)
 	}
@@ -199,11 +199,11 @@ func convertContractRow(row contractRow, productType roottypes.ProductType) (mix
 	out.PriceTick = decimalScale(int64(priceEndStep), -out.PricePrecision)
 	out.SizeStep = decimalScale(1, -out.SizePrecision)
 
-	out.MinLever, err = parseIntOrZero(row.MinLever)
+	out.MinLever, err = bgcommon.ParseIntOrZero(row.MinLever)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse minLever", err)
 	}
-	out.MaxLever, err = parseIntOrZero(row.MaxLever)
+	out.MaxLever, err = bgcommon.ParseIntOrZero(row.MaxLever)
 	if err != nil {
 		return mixtypes.SymbolInfo{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetSymbolInfo: parse maxLever", err)
 	}
@@ -306,7 +306,7 @@ func (m *MarketDataClient) GetOrderBook(ctx context.Context, symbol string, dept
 	if err != nil {
 		return roottypes.OrderBookSnapshot{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetOrderBook: parse bids", err)
 	}
-	out.TsMs, err = parseInt64OrZero(payload.Ts)
+	out.TsMs, err = bgcommon.ParseInt64OrZero(payload.Ts)
 	if err != nil {
 		return roottypes.OrderBookSnapshot{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetOrderBook: parse ts", err)
 	}
@@ -464,35 +464,35 @@ func convertTicker(row tickerRow) (mixtypes.MarketTicker, error) {
 	out.Symbol = row.Symbol
 
 	var err error
-	out.LastPrice, err = parseDecimalOrZero(row.LastPrice)
+	out.LastPrice, err = bgcommon.ParseDecimalOrZero(row.LastPrice)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("lastPr", err)
 	}
-	out.MarkPrice, err = parseDecimalOrZero(row.MarkPrice)
+	out.MarkPrice, err = bgcommon.ParseDecimalOrZero(row.MarkPrice)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("markPrice", err)
 	}
-	out.IndexPrice, err = parseDecimalOrZero(row.IndexPrice)
+	out.IndexPrice, err = bgcommon.ParseDecimalOrZero(row.IndexPrice)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("indexPrice", err)
 	}
-	out.AskPrice, err = parseDecimalOrZero(row.AskPrice)
+	out.AskPrice, err = bgcommon.ParseDecimalOrZero(row.AskPrice)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("askPr", err)
 	}
-	out.BidPrice, err = parseDecimalOrZero(row.BidPrice)
+	out.BidPrice, err = bgcommon.ParseDecimalOrZero(row.BidPrice)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("bidPr", err)
 	}
-	out.FundingRate, err = parseDecimalOrZero(row.FundingRate)
+	out.FundingRate, err = bgcommon.ParseDecimalOrZero(row.FundingRate)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("fundingRate", err)
 	}
-	out.NextFundingTimeMs, err = parseInt64OrZero(row.NextFundingTime)
+	out.NextFundingTimeMs, err = bgcommon.ParseInt64OrZero(row.NextFundingTime)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("nextFundingTime", err)
 	}
-	out.TsMs, err = parseInt64OrZero(row.Ts)
+	out.TsMs, err = bgcommon.ParseInt64OrZero(row.Ts)
 	if err != nil {
 		return mixtypes.MarketTicker{}, wrapTickerParseErr("ts", err)
 	}

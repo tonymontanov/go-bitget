@@ -52,6 +52,8 @@ import (
 	"github.com/shopspring/decimal"
 
 	bitget "github.com/tonymontanov/go-bitget/v2"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon/orderbook"
 	"github.com/tonymontanov/go-bitget/v2/internal/bgmet"
 	"github.com/tonymontanov/go-bitget/v2/internal/codec"
 	"github.com/tonymontanov/go-bitget/v2/internal/ws"
@@ -79,7 +81,7 @@ type StreamClient struct {
 	// engines holds one orderbook engine per subscribed symbol. Indexed
 	// by ws.SubscriptionArg.Key() so the same key the registry uses
 	// also reaches the engine.
-	engines map[string]*orderbookEngine
+	engines map[string]*orderbook.Engine
 
 	// orderbookSubs retains the books-channel Subscription per arg so
 	// scheduleResync can re-Subscribe the SAME object (with its handler
@@ -101,7 +103,7 @@ type StreamClient struct {
 func newStreamClient(c *Client) *StreamClient {
 	return &StreamClient{
 		c:             c,
-		engines:       make(map[string]*orderbookEngine, 16),
+		engines:       make(map[string]*orderbook.Engine, 16),
 		orderbookSubs: make(map[string]*ws.Subscription, 16),
 		resyncing:     make(map[string]struct{}, 8),
 	}
@@ -229,9 +231,9 @@ func (s *StreamClient) WatchOrderbook(
 	var maxDepth int = s.c.config().Orderbook.MaxDepth
 
 	s.mu.Lock()
-	var engine *orderbookEngine = s.engines[key]
+	var engine *orderbook.Engine = s.engines[key]
 	if engine == nil {
-		engine = newOrderbookEngine(symbol, maxDepth)
+		engine = orderbook.NewEngine(symbol, maxDepth)
 		s.engines[key] = engine
 	}
 	s.mu.Unlock()
@@ -377,7 +379,7 @@ func (s *StreamClient) WatchKline(
 // engine, surfaces snapshots to the user handler and reacts to CRC
 // mismatches by triggering a resubscribe.
 func (s *StreamClient) handleBooksFrame(
-	engine *orderbookEngine,
+	engine *orderbook.Engine,
 	arg ws.SubscriptionArg,
 	action string,
 	payload []byte,
@@ -403,19 +405,19 @@ func (s *StreamClient) handleBooksFrame(
 	// the per-row ts string, newer ones rely on the envelope ts).
 	var row orderbookFrame = rows[0]
 	var rowTsMs int64 = tsMs
-	if v, _ := parseInt64OrZero(row.Ts); v > 0 {
+	if v, _ := bgcommon.ParseInt64OrZero(row.Ts); v > 0 {
 		rowTsMs = v
 	}
 
-	var asks []orderbookLevel
+	var asks []orderbook.Level
 	var err error
-	asks, err = parseLevels(row.Asks)
+	asks, err = orderbook.ParseLevels(row.Asks)
 	if err != nil {
 		s.surfaceError(errHandler, "WatchOrderbook", "parse asks", err)
 		return
 	}
-	var bids []orderbookLevel
-	bids, err = parseLevels(row.Bids)
+	var bids []orderbook.Level
+	bids, err = orderbook.ParseLevels(row.Bids)
 	if err != nil {
 		s.surfaceError(errHandler, "WatchOrderbook", "parse bids", err)
 		return
@@ -432,11 +434,11 @@ func (s *StreamClient) handleBooksFrame(
 		return
 	}
 
-	if err == errOrderbookDirty {
+	if err == orderbook.ErrDirty {
 		// Engine is awaiting a snapshot; nothing to surface.
 		return
 	}
-	if err == errOrderbookChecksum {
+	if err == orderbook.ErrChecksum {
 		s.surfaceError(errHandler, "WatchOrderbook", "checksum mismatch (resyncing)", err)
 		s.scheduleResync(arg)
 		return
@@ -548,7 +550,7 @@ func (s *StreamClient) scheduleResync(arg ws.SubscriptionArg) {
 	s.resyncing[key] = struct{}{}
 	var conn *ws.Conn = s.publicConn
 	var sub *ws.Subscription = s.orderbookSubs[key]
-	var engine *orderbookEngine = s.engines[key]
+	var engine *orderbook.Engine = s.engines[key]
 	s.mu.Unlock()
 
 	if conn == nil || sub == nil {
@@ -622,75 +624,31 @@ type tradeFrame struct {
 // Wire → SDK conversions.
 // ---------------------------------------------------------------------
 
-// parseLevels turns a [["price","size"], ...] slice into engine levels.
-// Empty rows are tolerated (Bitget ships [] under "asks"/"bids" when
-// the side has no levels yet).
-func parseLevels(src [][]string) ([]orderbookLevel, error) {
-	if len(src) == 0 {
-		return nil, nil
-	}
-	var out []orderbookLevel = make([]orderbookLevel, 0, len(src))
-	var i int
-	for i = 0; i < len(src); i++ {
-		if len(src[i]) < 2 {
-			return nil, errLevelArity(i, len(src[i]))
-		}
-		var price decimal.Decimal
-		var size decimal.Decimal
-		var err error
-		price, err = decimal.NewFromString(src[i][0])
-		if err != nil {
-			return nil, errLevelDecode(i, "price", src[i][0], err)
-		}
-		size, err = decimal.NewFromString(src[i][1])
-		if err != nil {
-			return nil, errLevelDecode(i, "size", src[i][1], err)
-		}
-		out = append(out, orderbookLevel{
-			price:    price,
-			size:     size,
-			priceStr: src[i][0],
-			sizeStr:  src[i][1],
-		})
-	}
-	return out, nil
-}
-
-func errLevelArity(idx, got int) error {
-	return bitget.NewError(bitget.ErrorKindUnknown, "",
-		"mix.Stream: level["+strconv.Itoa(idx)+"] expects [price, size], got "+strconv.Itoa(got)+" elements", nil)
-}
-
-func errLevelDecode(idx int, field, val string, cause error) error {
-	return bitget.NewError(bitget.ErrorKindUnknown, "",
-		"mix.Stream: level["+strconv.Itoa(idx)+"]."+field+"="+val+": "+cause.Error(), cause)
-}
-
 func convertTickerFrame(symbol string, t tickerFrame) mixtypes.MarketTicker {
 	var resolvedSymbol string = symbol
 	if t.InstID != "" {
 		resolvedSymbol = t.InstID
 	}
 	var last decimal.Decimal
-	last, _ = parseDecimalOrZero(t.Last)
+	last, _ = bgcommon.ParseDecimalOrZero(t.Last)
 	var mark decimal.Decimal
-	mark, _ = parseDecimalOrZero(t.MarkPrice)
+	mark, _ = bgcommon.ParseDecimalOrZero(t.MarkPrice)
 	var index decimal.Decimal
-	index, _ = parseDecimalOrZero(t.IndexPrice)
+	index, _ = bgcommon.ParseDecimalOrZero(t.IndexPrice)
 	var ask decimal.Decimal
-	ask, _ = parseDecimalOrZero(t.AskPr)
+	ask, _ = bgcommon.ParseDecimalOrZero(t.AskPr)
 	var askSz decimal.Decimal
-	askSz, _ = parseDecimalOrZero(t.AskSz)
+	askSz, _ = bgcommon.ParseDecimalOrZero(t.AskSz)
 	var bid decimal.Decimal
-	bid, _ = parseDecimalOrZero(t.BidPr)
+	bid, _ = bgcommon.ParseDecimalOrZero(t.BidPr)
 	var bidSz decimal.Decimal
-	bidSz, _ = parseDecimalOrZero(t.BidSz)
+	bidSz, _ = bgcommon.ParseDecimalOrZero(t.BidSz)
 	var funding decimal.Decimal
-	funding, _ = parseDecimalOrZero(t.FundingRate)
+	funding, _ = bgcommon.ParseDecimalOrZero(t.FundingRate)
 	var nextFundingMs int64
-	nextFundingMs, _ = parseInt64OrZero(t.NextFundingTimeMs)
+	nextFundingMs, _ = bgcommon.ParseInt64OrZero(t.NextFundingTimeMs)
 	var tsMs int64
-	tsMs, _ = parseInt64OrZero(t.Ts)
+	tsMs, _ = bgcommon.ParseInt64OrZero(t.Ts)
 	return mixtypes.MarketTicker{
 		Symbol:            resolvedSymbol,
 		LastPrice:         last,
@@ -710,11 +668,11 @@ func convertTradeFrame(symbol string, t tradeFrame) (roottypes.TradeUpdate, erro
 	var price decimal.Decimal
 	var size decimal.Decimal
 	var err error
-	price, err = parseDecimalOrZero(t.Price)
+	price, err = bgcommon.ParseDecimalOrZero(t.Price)
 	if err != nil {
 		return roottypes.TradeUpdate{}, err
 	}
-	size, err = parseDecimalOrZero(t.Size)
+	size, err = bgcommon.ParseDecimalOrZero(t.Size)
 	if err != nil {
 		return roottypes.TradeUpdate{}, err
 	}
@@ -728,7 +686,7 @@ func convertTradeFrame(symbol string, t tradeFrame) (roottypes.TradeUpdate, erro
 		side = roottypes.SideType(t.Side)
 	}
 	var tsMs int64
-	tsMs, _ = parseInt64OrZero(t.Ts)
+	tsMs, _ = bgcommon.ParseInt64OrZero(t.Ts)
 	return roottypes.TradeUpdate{
 		Symbol:  symbol,
 		Price:   price,
@@ -755,32 +713,32 @@ func convertKlineRow(symbol string, tf roottypes.Timeframe, row []string) (roott
 	}
 	var openMs int64
 	var err error
-	openMs, err = parseInt64OrZero(row[0])
+	openMs, err = bgcommon.ParseInt64OrZero(row[0])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}
 	var open, high, low, close, volume, turnover decimal.Decimal
-	open, err = parseDecimalOrZero(row[1])
+	open, err = bgcommon.ParseDecimalOrZero(row[1])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}
-	high, err = parseDecimalOrZero(row[2])
+	high, err = bgcommon.ParseDecimalOrZero(row[2])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}
-	low, err = parseDecimalOrZero(row[3])
+	low, err = bgcommon.ParseDecimalOrZero(row[3])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}
-	close, err = parseDecimalOrZero(row[4])
+	close, err = bgcommon.ParseDecimalOrZero(row[4])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}
-	volume, err = parseDecimalOrZero(row[5])
+	volume, err = bgcommon.ParseDecimalOrZero(row[5])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}
-	turnover, err = parseDecimalOrZero(row[6])
+	turnover, err = bgcommon.ParseDecimalOrZero(row[6])
 	if err != nil {
 		return roottypes.KlineUpdate{}, err
 	}

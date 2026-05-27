@@ -66,6 +66,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	bitget "github.com/tonymontanov/go-bitget/v2"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
 	"github.com/tonymontanov/go-bitget/v2/internal/bgmet"
 	"github.com/tonymontanov/go-bitget/v2/internal/codec"
 	"github.com/tonymontanov/go-bitget/v2/internal/ws"
@@ -85,64 +86,6 @@ const (
 // V2 private orders / positions / fill / plan-order channels.
 // Passing any actual symbol yields code=30001 "...doesn't exist".
 const instIDDefaultPrivate = "default"
-
-/*
-flexString accepts either a JSON string or a JSON number / JSON null
-and stores the canonical decimal representation as a string.
-
-WHY:
-The Bitget V2 docs describe every numeric field on the private
-orders / positions / account / fill channels as a quoted string
-("size":"0.5", "price":"50000", "leverage":"5"), but the live
-server is inconsistent: at least the positions channel emits
-`leverage` as a JSON number on snapshots (observed in production
-PARTIUSDT field log under v1.2.0:
-`...openPriceAvg":"0.084501465025","leverage":5,"achievedProfits":"0"...`).
-A plain `string`-typed field then makes jsoniter abort the WHOLE
-row with `ReadString: expects " or n, but found 5`, the
-positions push gets dropped, and inventory updates fall back to
-REST polling — the exact UX we shipped flexCode to fix on the
-login envelope.
-
-flexString is the same idea generalised: accept both wire shapes,
-canonicalise to a decimal-string for the existing
-parseDecimalOrZero / parseInt64OrZero / parseIntOrZero helpers
-to consume. Numeric input is kept as raw bytes (so "5", "0.084501",
-"-1128.50454" round-trip identically) and `null` collapses to "".
-
-WHERE IT'S APPLIED:
-Every numeric / timestamp field on wsOrderRow / wsPositionRow /
-wsAccountRow. Identifier fields (instId, orderId, clientOid, side,
-tradeSide, marginMode, ...) stay as plain `string` because Bitget
-has no incentive to emit them numerically and the looser parse
-would mask actual server bugs.
-*/
-type flexString string
-
-// UnmarshalJSON makes flexString a json.Unmarshaler. The std lib
-// and jsoniter both honour this hook on reflection-based decoding.
-func (s *flexString) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
-		*s = ""
-		return nil
-	}
-	if data[0] == '"' && data[len(data)-1] == '"' {
-		var unquoted string
-		if err := codec.Unmarshal(data, &unquoted); err != nil {
-			return err
-		}
-		*s = flexString(unquoted)
-		return nil
-	}
-	// Numeric (int / float / scientific notation): keep raw bytes
-	// verbatim — they are already the canonical decimal string and
-	// match what the parseDecimalOrZero / parseInt* helpers expect.
-	*s = flexString(string(data))
-	return nil
-}
-
-// String returns the canonical decimal form for downstream parsing.
-func (s flexString) String() string { return string(s) }
 
 // privateConnState bundles every field that needs locking around the
 // private connection lifecycle. StreamClient embeds it under its own
@@ -534,19 +477,19 @@ type wsOrderRow struct {
 	OrderType      string     `json:"orderType"`
 	Force          string     `json:"force"`
 	Status         string     `json:"status"`
-	Size           flexString `json:"size"`
-	Price          flexString `json:"price"`
-	NotionalUSD    flexString `json:"notionalUsd"`
-	AccBaseVolume  flexString `json:"accBaseVolume"`
-	PriceAvg       flexString `json:"priceAvg"`
-	Fee            flexString `json:"fee"`
+	Size           bgcommon.FlexString `json:"size"`
+	Price          bgcommon.FlexString `json:"price"`
+	NotionalUSD    bgcommon.FlexString `json:"notionalUsd"`
+	AccBaseVolume  bgcommon.FlexString `json:"accBaseVolume"`
+	PriceAvg       bgcommon.FlexString `json:"priceAvg"`
+	Fee            bgcommon.FlexString `json:"fee"`
 	FeeDetailRaw   string     `json:"feeDetail"`
 	MarginCoin     string     `json:"marginCoin"`
 	MarginMode     string     `json:"marginMode"`
-	Leverage       flexString `json:"leverage"`
+	Leverage       bgcommon.FlexString `json:"leverage"`
 	ReduceOnly     string     `json:"reduceOnly"`
-	CTime          flexString `json:"cTime"`
-	UTime          flexString `json:"uTime"`
+	CTime          bgcommon.FlexString `json:"cTime"`
+	UTime          bgcommon.FlexString `json:"uTime"`
 }
 
 // wsPositionRow mirrors one element of the "positions" data array.
@@ -559,23 +502,23 @@ type wsPositionRow struct {
 	MarginCoin       string     `json:"marginCoin"`
 	HoldSide         string     `json:"holdSide"`
 	HoldMode         string     `json:"holdMode"`
-	OpenDelegateSize flexString `json:"openDelegateSize"`
-	MarginSize       flexString `json:"marginSize"`
-	Available        flexString `json:"available"`
-	Frozen           flexString `json:"frozen"`
-	Total            flexString `json:"total"`
-	Leverage         flexString `json:"leverage"`
-	AchievedProfits  flexString `json:"achievedProfits"`
-	OpenPriceAvg     flexString `json:"openPriceAvg"`
+	OpenDelegateSize bgcommon.FlexString `json:"openDelegateSize"`
+	MarginSize       bgcommon.FlexString `json:"marginSize"`
+	Available        bgcommon.FlexString `json:"available"`
+	Frozen           bgcommon.FlexString `json:"frozen"`
+	Total            bgcommon.FlexString `json:"total"`
+	Leverage         bgcommon.FlexString `json:"leverage"`
+	AchievedProfits  bgcommon.FlexString `json:"achievedProfits"`
+	OpenPriceAvg     bgcommon.FlexString `json:"openPriceAvg"`
 	MarginMode       string     `json:"marginMode"`
-	UnrealizedPL     flexString `json:"unrealizedPL"`
-	LiquidationPrice flexString `json:"liquidationPrice"`
-	KeepMarginRate   flexString `json:"keepMarginRate"`
-	MarkPrice        flexString `json:"markPrice"`
-	MarginRatio      flexString `json:"marginRatio"`
-	BreakEvenPrice   flexString `json:"breakEvenPrice"`
-	CTime            flexString `json:"cTime"`
-	UTime            flexString `json:"uTime"`
+	UnrealizedPL     bgcommon.FlexString `json:"unrealizedPL"`
+	LiquidationPrice bgcommon.FlexString `json:"liquidationPrice"`
+	KeepMarginRate   bgcommon.FlexString `json:"keepMarginRate"`
+	MarkPrice        bgcommon.FlexString `json:"markPrice"`
+	MarginRatio      bgcommon.FlexString `json:"marginRatio"`
+	BreakEvenPrice   bgcommon.FlexString `json:"breakEvenPrice"`
+	CTime            bgcommon.FlexString `json:"cTime"`
+	UTime            bgcommon.FlexString `json:"uTime"`
 }
 
 // wsAccountRow mirrors one element of the "account" data array. The
@@ -583,20 +526,20 @@ type wsPositionRow struct {
 // one margin coin. For USDT-FUTURES the array is length 1.
 type wsAccountRow struct {
 	MarginCoin         string     `json:"marginCoin"`
-	Frozen             flexString `json:"frozen"`
-	Available          flexString `json:"available"`
-	MaxOpenPosAvail    flexString `json:"maxOpenPosAvailable"`
-	MaxTransferOut     flexString `json:"maxTransferOut"`
-	Equity             flexString `json:"equity"`
-	UsdtEquity         flexString `json:"usdtEquity"`
-	BtcEquity          flexString `json:"btcEquity"`
-	UnrealizedPL       flexString `json:"unrealizedPL"`
-	CrossedRiskRate    flexString `json:"crossedRiskRate"`
-	CrossedMarginLever flexString `json:"crossedMarginLeverage"`
-	IsolatedLongLever  flexString `json:"isolatedLongLever"`
-	IsolatedShortLever flexString `json:"isolatedShortLever"`
-	Locked             flexString `json:"locked"`
-	Coupon             flexString `json:"coupon"`
+	Frozen             bgcommon.FlexString `json:"frozen"`
+	Available          bgcommon.FlexString `json:"available"`
+	MaxOpenPosAvail    bgcommon.FlexString `json:"maxOpenPosAvailable"`
+	MaxTransferOut     bgcommon.FlexString `json:"maxTransferOut"`
+	Equity             bgcommon.FlexString `json:"equity"`
+	UsdtEquity         bgcommon.FlexString `json:"usdtEquity"`
+	BtcEquity          bgcommon.FlexString `json:"btcEquity"`
+	UnrealizedPL       bgcommon.FlexString `json:"unrealizedPL"`
+	CrossedRiskRate    bgcommon.FlexString `json:"crossedRiskRate"`
+	CrossedMarginLever bgcommon.FlexString `json:"crossedMarginLeverage"`
+	IsolatedLongLever  bgcommon.FlexString `json:"isolatedLongLever"`
+	IsolatedShortLever bgcommon.FlexString `json:"isolatedShortLever"`
+	Locked             bgcommon.FlexString `json:"locked"`
+	Coupon             bgcommon.FlexString `json:"coupon"`
 }
 
 // ---------------------------------------------------------------------
@@ -617,31 +560,31 @@ func convertWSOrderRow(row wsOrderRow) (mixtypes.OrderInfo, error) {
 	}
 
 	var err error
-	out.Quantity, err = parseDecimalOrZero(string(row.Size))
+	out.Quantity, err = bgcommon.ParseDecimalOrZero(string(row.Size))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("size", err)
 	}
-	out.Price, err = parseDecimalOrZero(string(row.Price))
+	out.Price, err = bgcommon.ParseDecimalOrZero(string(row.Price))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("price", err)
 	}
-	out.FilledQuantity, err = parseDecimalOrZero(string(row.AccBaseVolume))
+	out.FilledQuantity, err = bgcommon.ParseDecimalOrZero(string(row.AccBaseVolume))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("accBaseVolume", err)
 	}
-	out.AvgFilledPrice, err = parseDecimalOrZero(string(row.PriceAvg))
+	out.AvgFilledPrice, err = bgcommon.ParseDecimalOrZero(string(row.PriceAvg))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("priceAvg", err)
 	}
-	out.CumFee, err = parseDecimalOrZero(string(row.Fee))
+	out.CumFee, err = bgcommon.ParseDecimalOrZero(string(row.Fee))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("fee", err)
 	}
-	out.CreatedAtMs, err = parseInt64OrZero(string(row.CTime))
+	out.CreatedAtMs, err = bgcommon.ParseInt64OrZero(string(row.CTime))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("cTime", err)
 	}
-	out.UpdatedAtMs, err = parseInt64OrZero(string(row.UTime))
+	out.UpdatedAtMs, err = bgcommon.ParseInt64OrZero(string(row.UTime))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("uTime", err)
 	}
@@ -657,47 +600,47 @@ func convertWSPositionRow(row wsPositionRow) (mixtypes.PositionInfo, error) {
 	}
 
 	var err error
-	out.Quantity, err = parseDecimalOrZero(string(row.Total))
+	out.Quantity, err = bgcommon.ParseDecimalOrZero(string(row.Total))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("total", err)
 	}
-	out.Available, err = parseDecimalOrZero(string(row.Available))
+	out.Available, err = bgcommon.ParseDecimalOrZero(string(row.Available))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("available", err)
 	}
-	out.Locked, err = parseDecimalOrZero(string(row.Frozen))
+	out.Locked, err = bgcommon.ParseDecimalOrZero(string(row.Frozen))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("frozen", err)
 	}
-	out.AvgOpenPrice, err = parseDecimalOrZero(string(row.OpenPriceAvg))
+	out.AvgOpenPrice, err = bgcommon.ParseDecimalOrZero(string(row.OpenPriceAvg))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("openPriceAvg", err)
 	}
-	out.MarkPrice, err = parseDecimalOrZero(string(row.MarkPrice))
+	out.MarkPrice, err = bgcommon.ParseDecimalOrZero(string(row.MarkPrice))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("markPrice", err)
 	}
-	out.LiquidationPrice, err = parseDecimalOrZero(string(row.LiquidationPrice))
+	out.LiquidationPrice, err = bgcommon.ParseDecimalOrZero(string(row.LiquidationPrice))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("liquidationPrice", err)
 	}
-	out.UnrealizedPnL, err = parseDecimalOrZero(string(row.UnrealizedPL))
+	out.UnrealizedPnL, err = bgcommon.ParseDecimalOrZero(string(row.UnrealizedPL))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("unrealizedPL", err)
 	}
-	out.RealizedPnL, err = parseDecimalOrZero(string(row.AchievedProfits))
+	out.RealizedPnL, err = bgcommon.ParseDecimalOrZero(string(row.AchievedProfits))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("achievedProfits", err)
 	}
-	out.Leverage, err = parseIntOrZero(string(row.Leverage))
+	out.Leverage, err = bgcommon.ParseIntOrZero(string(row.Leverage))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("leverage", err)
 	}
-	out.CreatedAtMs, err = parseInt64OrZero(string(row.CTime))
+	out.CreatedAtMs, err = bgcommon.ParseInt64OrZero(string(row.CTime))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("cTime", err)
 	}
-	out.UpdatedAtMs, err = parseInt64OrZero(string(row.UTime))
+	out.UpdatedAtMs, err = bgcommon.ParseInt64OrZero(string(row.UTime))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("uTime", err)
 	}
@@ -710,11 +653,11 @@ func convertWSAccountRow(row wsAccountRow) (roottypes.Balance, error) {
 	}
 
 	var err error
-	out.TotalEquity, err = parseDecimalOrZero(string(row.Equity))
+	out.TotalEquity, err = bgcommon.ParseDecimalOrZero(string(row.Equity))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("equity", err)
 	}
-	out.AvailableBalance, err = parseDecimalOrZero(string(row.Available))
+	out.AvailableBalance, err = bgcommon.ParseDecimalOrZero(string(row.Available))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("available", err)
 	}
@@ -723,37 +666,37 @@ func convertWSAccountRow(row wsAccountRow) (roottypes.Balance, error) {
 	// LockedBalance so downstream code does not need to know which
 	// transport delivered the row.
 	var locked decimal.Decimal
-	locked, err = parseDecimalOrZero(string(row.Frozen))
+	locked, err = bgcommon.ParseDecimalOrZero(string(row.Frozen))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("frozen", err)
 	}
 	if locked.IsZero() {
 		// Some Bitget endpoints emit both; prefer the non-zero one.
-		locked, err = parseDecimalOrZero(string(row.Locked))
+		locked, err = bgcommon.ParseDecimalOrZero(string(row.Locked))
 		if err != nil {
 			return roottypes.Balance{}, wrapWSAccountParseErr("locked", err)
 		}
 	}
 	out.LockedBalance = locked
 
-	out.UnrealizedPnL, err = parseDecimalOrZero(string(row.UnrealizedPL))
+	out.UnrealizedPnL, err = bgcommon.ParseDecimalOrZero(string(row.UnrealizedPL))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("unrealizedPL", err)
 	}
 	out.MaintenanceMargin = decimal.Zero
 
 	var usdtEquity decimal.Decimal
-	usdtEquity, err = parseDecimalOrZero(string(row.UsdtEquity))
+	usdtEquity, err = bgcommon.ParseDecimalOrZero(string(row.UsdtEquity))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("usdtEquity", err)
 	}
 	var btcEquity decimal.Decimal
-	btcEquity, err = parseDecimalOrZero(string(row.BtcEquity))
+	btcEquity, err = bgcommon.ParseDecimalOrZero(string(row.BtcEquity))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("btcEquity", err)
 	}
 	var frozen decimal.Decimal
-	frozen, err = parseDecimalOrZero(string(row.Frozen))
+	frozen, err = bgcommon.ParseDecimalOrZero(string(row.Frozen))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("frozen2", err)
 	}

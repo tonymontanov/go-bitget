@@ -1,11 +1,13 @@
 /*
-FILE: mix/orderbook-engine.go
+FILE: internal/bgcommon/orderbook/engine.go
 
 DESCRIPTION:
-Local order book engine for the Bitget V2 "books" channel. Maintains a
-per-symbol ascending-asks / descending-bids state, applies snapshots
-and incremental deltas, and validates the CRC32 checksum that Bitget
-ships on every frame.
+Profile-agnostic local order-book engine for Bitget V2 "books" channel.
+Maintains a per-symbol ascending-asks / descending-bids state, applies
+snapshots and incremental deltas, and validates the CRC32 checksum that
+Bitget ships on every frame. The engine is consumed identically by
+mix/, spot/ and uta/ stream clients — the wire format and CRC formula
+are uniform across profiles.
 
 PROTOCOL (Bitget V2 books channel):
 
@@ -41,7 +43,7 @@ CRC32 FORMULA (Bitget V2):
 
 ENGINE LIFECYCLE:
 
-  - construct via newOrderbookEngine(symbol, maxDepth, logger);
+  - construct via NewEngine(symbol, maxDepth);
   - feed every push frame through ApplySnapshot / ApplyUpdate;
   - read state via Snapshot();
   - on Reset (called by ws.Conn before every (re)subscribe) the
@@ -51,13 +53,13 @@ ENGINE LIFECYCLE:
 CONCURRENCY:
 
 The engine is feature-complete behind a single mutex. ApplySnapshot /
-ApplyUpdate / Snapshot serialise on it. The hot path is one RWMutex
+ApplyUpdate / Snapshot serialise on it. The hot path is one mutex
 acquisition per push — for 200-level depth that costs <1 µs per frame
 on commodity hardware, well under the per-frame budget of the consumer
 side.
 */
 
-package mix
+package orderbook
 
 import (
 	"errors"
@@ -70,66 +72,72 @@ import (
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
 )
 
-// orderbookCRCDepth — number of levels per side that participate in
-// the CRC32 calculation. Bitget V2 fixes this at 25 (see Bitget
-// "books" channel documentation, section "checksum verification").
-const orderbookCRCDepth = 25
+// CRCDepth — number of levels per side that participate in the CRC32
+// calculation. Bitget V2 fixes this at 25 (see Bitget "books" channel
+// documentation, section "checksum verification").
+const CRCDepth = 25
 
-// errOrderbookChecksum is returned by ApplyUpdate when the recomputed
-// CRC32 disagrees with the server-shipped value. Callers (StreamClient)
+// ErrChecksum is returned by ApplyUpdate / ApplySnapshot when the
+// recomputed CRC32 disagrees with the server-shipped value. Callers
 // react by triggering a resubscribe.
-var errOrderbookChecksum = errors.New("mix.Orderbook: checksum mismatch")
+var ErrChecksum = errors.New("orderbook: checksum mismatch")
 
-// errOrderbookDirty is returned by ApplyUpdate while the engine is
-// waiting for the next snapshot (e.g. after a previous CRC mismatch).
-// Callers should drop the update silently and wait for the snapshot.
-var errOrderbookDirty = errors.New("mix.Orderbook: dirty, awaiting snapshot")
+// ErrDirty is returned by ApplyUpdate while the engine is waiting for
+// the next snapshot (e.g. after a previous CRC mismatch). Callers
+// should drop the update silently and wait for the snapshot.
+var ErrDirty = errors.New("orderbook: dirty, awaiting snapshot")
 
-// orderbookLevel mirrors one Bitget V2 [price, size] pair, keeping
-// BOTH the parsed decimal and the verbatim wire strings. The wire
-// strings are required for the bit-for-bit CRC32 reproduction; the
-// parsed decimals serve every other consumer (Snapshot output,
-// downstream conversion).
-type orderbookLevel struct {
-	price    decimal.Decimal
-	size     decimal.Decimal
-	priceStr string
-	sizeStr  string
+// Level mirrors one Bitget V2 [price, size] pair, keeping BOTH the
+// parsed decimal and the verbatim wire strings. The wire strings are
+// required for the bit-for-bit CRC32 reproduction; the parsed
+// decimals serve every other consumer (Snapshot output, downstream
+// conversion).
+//
+// Fields are exported so callers in profile packages (mix/, spot/,
+// uta/) can construct levels directly when feeding the engine from a
+// custom decoded representation. The canonical constructor for a
+// wire row is ParseLevels.
+type Level struct {
+	Price    decimal.Decimal
+	Size     decimal.Decimal
+	PriceStr string
+	SizeStr  string
 }
 
-// orderbookEngine — per-symbol engine state.
-type orderbookEngine struct {
+// Engine — per-symbol engine state.
+type Engine struct {
 	mu sync.Mutex
 
 	symbol   string
 	maxDepth int
 
 	// asks — sorted ASCENDING by price (best ask = asks[0]).
-	asks []orderbookLevel
+	asks []Level
 	// bids — sorted DESCENDING by price (best bid = bids[0]).
-	bids []orderbookLevel
+	bids []Level
 	// tsMs — last applied push timestamp (ms).
 	tsMs int64
-	// checksum — CRC32 echoed by the last successful push. Useful for
-	// debugging; not used by the engine itself.
+	// checksum — CRC32 echoed by the last successful push. Useful
+	// for debugging; not used by the engine itself.
 	checksum int64
-	// dirty — true between a CRC mismatch and the arrival of the next
-	// snapshot. While dirty, ApplyUpdate is a no-op and Snapshot
-	// returns the symbol-only zero value.
+	// dirty — true between a CRC mismatch and the arrival of the
+	// next snapshot. While dirty, ApplyUpdate is a no-op and
+	// Snapshot returns the symbol-only zero value.
 	dirty bool
 }
 
-// newOrderbookEngine constructs an empty engine. maxDepth caps the
-// stored side length; 0 falls back to the SDK default (200).
-func newOrderbookEngine(symbol string, maxDepth int) *orderbookEngine {
+// NewEngine constructs an empty engine. maxDepth caps the stored side
+// length; 0 falls back to 200 (matches the SDK Orderbook.MaxDepth
+// default).
+func NewEngine(symbol string, maxDepth int) *Engine {
 	if maxDepth <= 0 {
 		maxDepth = 200
 	}
-	return &orderbookEngine{
+	return &Engine{
 		symbol:   symbol,
 		maxDepth: maxDepth,
-		asks:     make([]orderbookLevel, 0, maxDepth),
-		bids:     make([]orderbookLevel, 0, maxDepth),
+		asks:     make([]Level, 0, maxDepth),
+		bids:     make([]Level, 0, maxDepth),
 		dirty:    true, // requires a snapshot before update is meaningful
 	}
 }
@@ -137,7 +145,7 @@ func newOrderbookEngine(symbol string, maxDepth int) *orderbookEngine {
 // Reset drops state. Called by the ws.Conn supervisor before every
 // (re)subscribe so a stale push that arrived on the previous socket
 // cannot race with the engine.
-func (e *orderbookEngine) Reset() {
+func (e *Engine) Reset() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.asks = e.asks[:0]
@@ -150,9 +158,9 @@ func (e *orderbookEngine) Reset() {
 // ApplySnapshot replaces the engine state with the snapshot's
 // asks/bids. The snapshot's checksum is validated for diagnostics
 // (snapshot mismatch is a server-side bug rather than a sync issue),
-// but the new state is committed regardless — "the server says this is
-// the truth" trumps the engine's local recomputation.
-func (e *orderbookEngine) ApplySnapshot(asks, bids []orderbookLevel, tsMs, checksum int64) error {
+// but the new state is committed regardless — "the server says this
+// is the truth" trumps the engine's local recomputation.
+func (e *Engine) ApplySnapshot(asks, bids []Level, tsMs, checksum int64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -178,25 +186,25 @@ func (e *orderbookEngine) ApplySnapshot(asks, bids []orderbookLevel, tsMs, check
 	if checksum == 0 {
 		return nil
 	}
-	var got int32 = computeOrderbookCRC(e.asks, e.bids)
+	var got int32 = ComputeCRC(e.asks, e.bids)
 	if int32(checksum) != got {
 		// Snapshot mismatch — keep the state (it's still the most
 		// authoritative thing we have) but surface the discrepancy.
-		return errOrderbookChecksum
+		return ErrChecksum
 	}
 	return nil
 }
 
-// ApplyUpdate merges an incremental delta. Returns errOrderbookDirty
-// when called before the first snapshot (or right after a CRC mismatch),
-// errOrderbookChecksum when the recomputed CRC disagrees with the
-// server-shipped value.
-func (e *orderbookEngine) ApplyUpdate(asks, bids []orderbookLevel, tsMs, checksum int64) error {
+// ApplyUpdate merges an incremental delta. Returns ErrDirty when called
+// before the first snapshot (or right after a CRC mismatch),
+// ErrChecksum when the recomputed CRC disagrees with the server-shipped
+// value.
+func (e *Engine) ApplyUpdate(asks, bids []Level, tsMs, checksum int64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.dirty {
-		return errOrderbookDirty
+		return ErrDirty
 	}
 
 	var i int
@@ -220,12 +228,12 @@ func (e *orderbookEngine) ApplyUpdate(asks, bids []orderbookLevel, tsMs, checksu
 	if checksum == 0 {
 		return nil
 	}
-	var got int32 = computeOrderbookCRC(e.asks, e.bids)
+	var got int32 = ComputeCRC(e.asks, e.bids)
 	if int32(checksum) != got {
-		// Mark dirty so subsequent updates are dropped until the next
-		// snapshot lands.
+		// Mark dirty so subsequent updates are dropped until the
+		// next snapshot lands.
 		e.dirty = true
-		return errOrderbookChecksum
+		return ErrChecksum
 	}
 	return nil
 }
@@ -233,7 +241,7 @@ func (e *orderbookEngine) ApplyUpdate(asks, bids []orderbookLevel, tsMs, checksu
 // Snapshot returns the current engine state as a roottypes
 // OrderBookSnapshot. The slices are copies — callers may retain them
 // across calls without worrying about mutation.
-func (e *orderbookEngine) Snapshot() roottypes.OrderBookSnapshot {
+func (e *Engine) Snapshot() roottypes.OrderBookSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -253,10 +261,50 @@ func (e *orderbookEngine) Snapshot() roottypes.OrderBookSnapshot {
 // IsDirty reports whether the engine is currently awaiting a snapshot.
 // Used by stream tests; production code surfaces dirty state via the
 // errors returned from ApplyUpdate.
-func (e *orderbookEngine) IsDirty() bool {
+func (e *Engine) IsDirty() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.dirty
+}
+
+// ---------------------------------------------------------------------
+// Wire decoding.
+// ---------------------------------------------------------------------
+
+// ParseLevels converts a slice of [price, size] string tuples (the
+// shape Bitget ships on the "books" channel) into engine Levels with
+// both decimal-parsed values and verbatim wire strings preserved for
+// CRC reproduction. Empty / 1-element rows are rejected with the same
+// error so callers can wrap the message uniformly.
+func ParseLevels(rows [][]string) ([]Level, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	var out []Level = make([]Level, 0, len(rows))
+	var i int
+	for i = 0; i < len(rows); i++ {
+		var row []string = rows[i]
+		if len(row) < 2 {
+			return nil, errors.New("orderbook: level must be [price, size]")
+		}
+		var price, size decimal.Decimal
+		var err error
+		price, err = decimal.NewFromString(row[0])
+		if err != nil {
+			return nil, err
+		}
+		size, err = decimal.NewFromString(row[1])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Level{
+			Price:    price,
+			Size:     size,
+			PriceStr: row[0],
+			SizeStr:  row[1],
+		})
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------
@@ -264,51 +312,52 @@ func (e *orderbookEngine) IsDirty() bool {
 // ---------------------------------------------------------------------
 
 // sortAsks sorts the slice ASCENDING by price.
-func sortAsks(levels []orderbookLevel) {
-	// Insertion sort: snapshot input is mostly already sorted, so the
-	// O(N) best case beats O(N log N) of sort.Slice for the hot path.
+func sortAsks(levels []Level) {
+	// Insertion sort: snapshot input is mostly already sorted, so
+	// the O(N) best case beats O(N log N) of sort.Slice for the
+	// hot path.
 	var i int
 	for i = 1; i < len(levels); i++ {
 		var j int
-		for j = i; j > 0 && levels[j].price.LessThan(levels[j-1].price); j-- {
+		for j = i; j > 0 && levels[j].Price.LessThan(levels[j-1].Price); j-- {
 			levels[j], levels[j-1] = levels[j-1], levels[j]
 		}
 	}
 }
 
 // sortBids sorts the slice DESCENDING by price.
-func sortBids(levels []orderbookLevel) {
+func sortBids(levels []Level) {
 	var i int
 	for i = 1; i < len(levels); i++ {
 		var j int
-		for j = i; j > 0 && levels[j].price.GreaterThan(levels[j-1].price); j-- {
+		for j = i; j > 0 && levels[j].Price.GreaterThan(levels[j-1].Price); j-- {
 			levels[j], levels[j-1] = levels[j-1], levels[j]
 		}
 	}
 }
 
 // upsertAsk inserts or replaces an ask level (ascending). size==0 →
-// remove. Linear in worst case; for 200-level depth this is well below
-// the per-frame budget on x86_64.
-func upsertAsk(levels []orderbookLevel, lvl orderbookLevel) []orderbookLevel {
+// remove. Linear in worst case; for 200-level depth this is well
+// below the per-frame budget on x86_64.
+func upsertAsk(levels []Level, lvl Level) []Level {
 	var i int
 	for i = 0; i < len(levels); i++ {
-		var cmp int = lvl.price.Cmp(levels[i].price)
+		var cmp int = lvl.Price.Cmp(levels[i].Price)
 		if cmp == 0 {
-			if lvl.size.IsZero() {
+			if lvl.Size.IsZero() {
 				return append(levels[:i], levels[i+1:]...)
 			}
 			levels[i] = lvl
 			return levels
 		}
 		if cmp < 0 {
-			if lvl.size.IsZero() {
+			if lvl.Size.IsZero() {
 				return levels // already absent
 			}
 			return insertAt(levels, i, lvl)
 		}
 	}
-	if lvl.size.IsZero() {
+	if lvl.Size.IsZero() {
 		return levels
 	}
 	return append(levels, lvl)
@@ -316,48 +365,48 @@ func upsertAsk(levels []orderbookLevel, lvl orderbookLevel) []orderbookLevel {
 
 // upsertBid inserts or replaces a bid level (descending). Mirror of
 // upsertAsk except for the comparison direction.
-func upsertBid(levels []orderbookLevel, lvl orderbookLevel) []orderbookLevel {
+func upsertBid(levels []Level, lvl Level) []Level {
 	var i int
 	for i = 0; i < len(levels); i++ {
-		var cmp int = lvl.price.Cmp(levels[i].price)
+		var cmp int = lvl.Price.Cmp(levels[i].Price)
 		if cmp == 0 {
-			if lvl.size.IsZero() {
+			if lvl.Size.IsZero() {
 				return append(levels[:i], levels[i+1:]...)
 			}
 			levels[i] = lvl
 			return levels
 		}
 		if cmp > 0 {
-			if lvl.size.IsZero() {
+			if lvl.Size.IsZero() {
 				return levels
 			}
 			return insertAt(levels, i, lvl)
 		}
 	}
-	if lvl.size.IsZero() {
+	if lvl.Size.IsZero() {
 		return levels
 	}
 	return append(levels, lvl)
 }
 
 // insertAt inserts lvl at index i, shifting the tail right.
-func insertAt(levels []orderbookLevel, i int, lvl orderbookLevel) []orderbookLevel {
-	levels = append(levels, orderbookLevel{})
+func insertAt(levels []Level, i int, lvl Level) []Level {
+	levels = append(levels, Level{})
 	copy(levels[i+1:], levels[i:])
 	levels[i] = lvl
 	return levels
 }
 
-// copyLevelsToWire converts engine levels to roottypes OrderBookLevels.
-// Allocates a fresh slice so callers can retain the result across
-// further engine mutations.
-func copyLevelsToWire(src []orderbookLevel) []roottypes.OrderBookLevel {
+// copyLevelsToWire converts engine levels to roottypes
+// OrderBookLevels. Allocates a fresh slice so callers can retain the
+// result across further engine mutations.
+func copyLevelsToWire(src []Level) []roottypes.OrderBookLevel {
 	var out []roottypes.OrderBookLevel = make([]roottypes.OrderBookLevel, len(src))
 	var i int
 	for i = 0; i < len(src); i++ {
 		out[i] = roottypes.OrderBookLevel{
-			Price: src[i].price,
-			Size:  src[i].size,
+			Price: src[i].Price,
+			Size:  src[i].Size,
 		}
 	}
 	return out
@@ -367,26 +416,26 @@ func copyLevelsToWire(src []orderbookLevel) []roottypes.OrderBookLevel {
 // CRC32.
 // ---------------------------------------------------------------------
 
-// computeOrderbookCRC builds the colon-joined string from the top
-// orderbookCRCDepth bid/ask pairs and runs CRC32(IEEE) on it. Returns
-// int32 (signed) — Bitget echoes the value as a signed integer, and
-// that's what the env shipped from the wire.
-func computeOrderbookCRC(asks, bids []orderbookLevel) int32 {
+// ComputeCRC builds the colon-joined string from the top CRCDepth
+// bid/ask pairs and runs CRC32(IEEE) on it. Returns int32 (signed) —
+// Bitget echoes the value as a signed integer, and that's what the
+// envelope shipped from the wire.
+func ComputeCRC(asks, bids []Level) int32 {
 	var nAsks int = len(asks)
-	if nAsks > orderbookCRCDepth {
-		nAsks = orderbookCRCDepth
+	if nAsks > CRCDepth {
+		nAsks = CRCDepth
 	}
 	var nBids int = len(bids)
-	if nBids > orderbookCRCDepth {
-		nBids = orderbookCRCDepth
+	if nBids > CRCDepth {
+		nBids = CRCDepth
 	}
 	var pairs int = nAsks
 	if nBids > pairs {
 		pairs = nBids
 	}
 
-	// Pre-size the builder to avoid reallocation on the typical 25-pair
-	// input. Each pair contributes ~40 bytes worst case.
+	// Pre-size the builder to avoid reallocation on the typical
+	// 25-pair input. Each pair contributes ~40 bytes worst case.
 	var sb strings.Builder
 	sb.Grow(pairs * 40)
 
@@ -396,17 +445,17 @@ func computeOrderbookCRC(asks, bids []orderbookLevel) int32 {
 			sb.WriteByte(':')
 		}
 		if i < nBids {
-			sb.WriteString(bids[i].priceStr)
+			sb.WriteString(bids[i].PriceStr)
 			sb.WriteByte(':')
-			sb.WriteString(bids[i].sizeStr)
+			sb.WriteString(bids[i].SizeStr)
 		}
 		if i < nAsks {
 			if i < nBids {
 				sb.WriteByte(':')
 			}
-			sb.WriteString(asks[i].priceStr)
+			sb.WriteString(asks[i].PriceStr)
 			sb.WriteByte(':')
-			sb.WriteString(asks[i].sizeStr)
+			sb.WriteString(asks[i].SizeStr)
 		}
 	}
 

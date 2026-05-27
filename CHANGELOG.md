@@ -4,6 +4,53 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.2.2 — 2026-05-28
+
+### Changed (internal — no public API change)
+
+- **Profile-agnostic infrastructure extracted from `mix/` into the
+  shared `internal/bgcommon` layer** ahead of the v2.0 spot profile.
+  The two-layer architecture rule for this SDK is "no parallel
+  copy-paste": every helper that is the same on the wire across
+  profiles lives in one place and is consumed by mix/, spot/, uta/
+  via direct import — never via cross-profile delegation.
+
+  Moved:
+
+  - **`internal/bgcommon/numeric.go`**: `ParseDecimalOrZero`,
+    `ParseInt64OrZero`, `ParseIntOrZero`. Bitget V2 ships every
+    numeric scalar as a JSON string with empty-as-zero semantics —
+    one parser, all profiles.
+  - **`internal/bgcommon/restdoer.go`**: `RestDoer` interface
+    (the test seam over `*rest.Client.Do`). Was duplicated as
+    `mix.restDoer`; spot/uta would have duplicated it again.
+  - **`internal/bgcommon/flexstring.go`**: `FlexString` type for
+    JSON fields that wire as either quoted string or bare number
+    (the `leverage:5` regression we shipped v1.2.1 to fix on the
+    `positions` channel — same shape exists on spot account /
+    fills, so the type belongs in shared infrastructure).
+  - **`internal/bgcommon/orderbook/`** (new sub-package):
+    `Engine`, `Level`, `ParseLevels`, `ComputeCRC`, `ErrChecksum`,
+    `ErrDirty`. The Bitget V2 "books" CRC32 protocol is identical
+    on mix and spot; the engine is now the single source of
+    truth, with profile-specific stream wiring built on top.
+
+  `mix/parse-helpers.go`, `mix/rest-doer.go`,
+  `mix/orderbook-engine.go`, and the `flexString` definition
+  inside `mix/stream-private.go` were deleted in favour of the
+  shared symbols. `mix/orderbook_engine_test.go` moved to
+  `internal/bgcommon/orderbook/engine_test.go`. All other
+  contract-tests pass without modification.
+
+  External callers see no change — every `mix.*` exported symbol
+  keeps its name and signature.
+
+### Why patch (not minor)
+
+Public API is unchanged, behaviour is unchanged, wire format is
+unchanged. Only the internal layout was refactored, so this is a
+patch release per SemVer.
+
 ## v1.2.1 — 2026-05-27
 
 ### Fixed (high-impact)

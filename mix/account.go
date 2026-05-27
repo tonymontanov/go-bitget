@@ -56,6 +56,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	bitget "github.com/tonymontanov/go-bitget/v2"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
 	"github.com/tonymontanov/go-bitget/v2/internal/rest"
 	mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
@@ -96,7 +97,7 @@ const openOrdersMaxPages = 10
 //
 // Field naming follows the live Bitget V2 wire format. Numeric fields
 // arrive as JSON strings — the SDK normalises them via
-// parseDecimalOrZero so empty strings resolve to decimal.Zero rather
+// bgcommon.ParseDecimalOrZero so empty strings resolve to decimal.Zero rather
 // than failing the parser.
 type accountsRow struct {
 	MarginCoin       string `json:"marginCoin"`
@@ -176,19 +177,19 @@ func convertAccountRow(row accountsRow) (roottypes.Balance, error) {
 	}
 
 	var err error
-	out.TotalEquity, err = parseDecimalOrZero(row.AccountEquity)
+	out.TotalEquity, err = bgcommon.ParseDecimalOrZero(row.AccountEquity)
 	if err != nil {
 		return roottypes.Balance{}, wrapAccountParseErr("accountEquity", err)
 	}
-	out.AvailableBalance, err = parseDecimalOrZero(row.Available)
+	out.AvailableBalance, err = bgcommon.ParseDecimalOrZero(row.Available)
 	if err != nil {
 		return roottypes.Balance{}, wrapAccountParseErr("available", err)
 	}
-	out.LockedBalance, err = parseDecimalOrZero(row.Locked)
+	out.LockedBalance, err = bgcommon.ParseDecimalOrZero(row.Locked)
 	if err != nil {
 		return roottypes.Balance{}, wrapAccountParseErr("locked", err)
 	}
-	out.UnrealizedPnL, err = parseDecimalOrZero(row.UnrealizedPL)
+	out.UnrealizedPnL, err = bgcommon.ParseDecimalOrZero(row.UnrealizedPL)
 	if err != nil {
 		return roottypes.Balance{}, wrapAccountParseErr("unrealizedPL", err)
 	}
@@ -199,12 +200,12 @@ func convertAccountRow(row accountsRow) (roottypes.Balance, error) {
 	out.MaintenanceMargin = decimal.Zero
 
 	var usdtEquity decimal.Decimal
-	usdtEquity, err = parseDecimalOrZero(row.UsdtEquity)
+	usdtEquity, err = bgcommon.ParseDecimalOrZero(row.UsdtEquity)
 	if err != nil {
 		return roottypes.Balance{}, wrapAccountParseErr("usdtEquity", err)
 	}
 	var btcEquity decimal.Decimal
-	btcEquity, err = parseDecimalOrZero(row.BtcEquity)
+	btcEquity, err = bgcommon.ParseDecimalOrZero(row.BtcEquity)
 	if err != nil {
 		return roottypes.Balance{}, wrapAccountParseErr("btcEquity", err)
 	}
@@ -308,7 +309,7 @@ func (a *AccountClient) GetPosition(ctx context.Context, symbol string) (mixtype
 	var i int
 	for i = 0; i < len(rows); i++ {
 		var total decimal.Decimal
-		total, err = parseDecimalOrZero(rows[i].Total)
+		total, err = bgcommon.ParseDecimalOrZero(rows[i].Total)
 		if err != nil {
 			return out, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Account.GetPosition: parse total", err)
 		}
@@ -333,47 +334,47 @@ func convertPositionRow(row positionRow) (mixtypes.PositionInfo, error) {
 	}
 
 	var err error
-	out.Quantity, err = parseDecimalOrZero(row.Total)
+	out.Quantity, err = bgcommon.ParseDecimalOrZero(row.Total)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("total", err)
 	}
-	out.Available, err = parseDecimalOrZero(row.Available)
+	out.Available, err = bgcommon.ParseDecimalOrZero(row.Available)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("available", err)
 	}
-	out.Locked, err = parseDecimalOrZero(row.Locked)
+	out.Locked, err = bgcommon.ParseDecimalOrZero(row.Locked)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("locked", err)
 	}
-	out.AvgOpenPrice, err = parseDecimalOrZero(row.OpenPriceAvg)
+	out.AvgOpenPrice, err = bgcommon.ParseDecimalOrZero(row.OpenPriceAvg)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("openPriceAvg", err)
 	}
-	out.MarkPrice, err = parseDecimalOrZero(row.MarkPrice)
+	out.MarkPrice, err = bgcommon.ParseDecimalOrZero(row.MarkPrice)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("markPrice", err)
 	}
-	out.LiquidationPrice, err = parseDecimalOrZero(row.LiquidationPrice)
+	out.LiquidationPrice, err = bgcommon.ParseDecimalOrZero(row.LiquidationPrice)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("liquidationPrice", err)
 	}
-	out.UnrealizedPnL, err = parseDecimalOrZero(row.UnrealizedPL)
+	out.UnrealizedPnL, err = bgcommon.ParseDecimalOrZero(row.UnrealizedPL)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("unrealizedPL", err)
 	}
-	out.RealizedPnL, err = parseDecimalOrZero(row.AchievedProfits)
+	out.RealizedPnL, err = bgcommon.ParseDecimalOrZero(row.AchievedProfits)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("achievedProfits", err)
 	}
-	out.Leverage, err = parseIntOrZero(row.Leverage)
+	out.Leverage, err = bgcommon.ParseIntOrZero(row.Leverage)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("leverage", err)
 	}
-	out.CreatedAtMs, err = parseInt64OrZero(row.CTime)
+	out.CreatedAtMs, err = bgcommon.ParseInt64OrZero(row.CTime)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("cTime", err)
 	}
-	out.UpdatedAtMs, err = parseInt64OrZero(row.UTime)
+	out.UpdatedAtMs, err = bgcommon.ParseInt64OrZero(row.UTime)
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapPositionParseErr("uTime", err)
 	}
@@ -572,31 +573,31 @@ func convertOrderRow(row orderRow) (mixtypes.OrderInfo, error) {
 	}
 
 	var err error
-	out.Quantity, err = parseDecimalOrZero(row.Size)
+	out.Quantity, err = bgcommon.ParseDecimalOrZero(row.Size)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("size", err)
 	}
-	out.Price, err = parseDecimalOrZero(row.Price)
+	out.Price, err = bgcommon.ParseDecimalOrZero(row.Price)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("price", err)
 	}
-	out.FilledQuantity, err = parseDecimalOrZero(row.BaseVolume)
+	out.FilledQuantity, err = bgcommon.ParseDecimalOrZero(row.BaseVolume)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("baseVolume", err)
 	}
-	out.AvgFilledPrice, err = parseDecimalOrZero(row.PriceAvg)
+	out.AvgFilledPrice, err = bgcommon.ParseDecimalOrZero(row.PriceAvg)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("priceAvg", err)
 	}
-	out.CumFee, err = parseDecimalOrZero(row.Fee)
+	out.CumFee, err = bgcommon.ParseDecimalOrZero(row.Fee)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("fee", err)
 	}
-	out.CreatedAtMs, err = parseInt64OrZero(row.CTime)
+	out.CreatedAtMs, err = bgcommon.ParseInt64OrZero(row.CTime)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("cTime", err)
 	}
-	out.UpdatedAtMs, err = parseInt64OrZero(row.UTime)
+	out.UpdatedAtMs, err = bgcommon.ParseInt64OrZero(row.UTime)
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapOrderParseErr("uTime", err)
 	}
