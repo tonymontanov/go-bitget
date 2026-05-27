@@ -6,12 +6,14 @@ HFT / algorithmic trading.
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
 Latest stable: **v1.2.2** — production-ready MIX (USDT-margined perps).
+Latest milestone: **v2.0.0-m1** — `spot/` scaffolding (no functional REST/WS yet; M2..M5 fill it in).
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
 
 `v1.0` covers the **MIX (USDT-margined perpetuals)** category end-to-end.
-Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
+Spot work has begun under **v2.0** (scaffolding shipped in v2.0.0-m1).
+The new **UTA (V3)** family is deferred to v2.5.
 
 | Module | Status | Notes |
 | --- | --- | --- |
@@ -26,7 +28,8 @@ Spot is deferred to v2.0 and the new **UTA (V3)** family to v2.5.
 | **M4** `mix/stream.go` (public WS + order-book engine) | done | WatchOrderbook (`books` channel: full-depth snapshot + incremental deltas, top-25 CRC32 validation, dirty-on-mismatch + auto-resubscribe round-trip), WatchTicker, WatchTrades (per-tick fan-out), WatchKline (`candle{tf}`); shared lazy-init public `*ws.Conn` multiplexes every channel; per-Watch ctx scopes the subscription, not the connection. |
 | **M5** `mix/stream-private.go` (private WS) | done | WatchOrders / WatchPositions / WatchAccount on a lazily-dialed signed `*ws.Conn`; per-row fan-out so the caller handler is invoked once per state change; auth pre-flight returns `ErrorKindAuth` when the signer has no credentials. |
 | **v1.0 release** | done | extended error-code coverage (~115 V2 codes); runnable `examples/` (marketdata, place-order, private-stream); `CHANGELOG.md`. |
-| **v2.0** `spot/` profile | pending | Trading / Account / MarketData / Stream mirroring `mix/` |
+| **v2.0-m1** `spot/` scaffolding | done | `spot.Client` + Trading / Account / MarketData / Stream sub-client stubs; factory wired into `bitget.Client.Spot()`; smoke tests pin the M1 contract. |
+| **v2.0-m2..m5** `spot/` profile | pending | M2: Trading + MarketData REST. M3: Account + history. M4: public WS (books / ticker / trade / candles) on the shared CRC32 engine. M5: private WS (account / orders / fills). |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
 ## Quick start

@@ -4,6 +4,55 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0-m1 — 2026-05-28
+
+First milestone of the **v2.0 SPOT** profile. Functional behaviour does
+not change — `mix/` is unaffected and the new `spot/` package only
+exposes scaffolding. The milestone tag exists so the desk-side
+connector can pin the SDK while later milestones (M2..M5) land.
+
+### Added
+
+- **`spot/` package** — Bitget V2 SPOT profile root sub-client.
+  - `spot.Client` mirrors the `mix.Client` shape (Trading / Account /
+    MarketData / Stream sub-clients) but drops every mix-specific
+    pin (no productType, no marginMode, no marginCoin, no
+    holdSide, no tradeSide, no positions, no leverage).
+  - `spot.NewClient(parent)` constructs all four sub-clients eagerly;
+    every `Client.Trading() / Account() / MarketData() / Stream()`
+    getter returns non-nil immediately. M1 ships only struct +
+    constructor for each sub-client; the REST / WS endpoint methods
+    land in M2..M5.
+  - `init()` registers a factory in the root package, so callers can
+    reach the spot client through `bitget.Client.Spot().(*spot.Client)`
+    once `_ "github.com/tonymontanov/go-bitget/v2/spot"` is imported.
+  - `spot.SpotInstType = "SPOT"` constant — the literal Bitget V2
+    expects in WebSocket subscription `instType` for every spot
+    channel.
+- **`spot/types/` namespace** — placeholder for spot-specific request
+  / response shapes (filled in M2..M5).
+- **Smoke tests** — pin the M1 contracts so future milestones cannot
+  regress them silently:
+  - `NewClient(nil)` returns nil.
+  - `NewClient(parent)` builds Trading / Account / MarketData / Stream.
+  - `bitget.Client.Spot()` factory wiring works once the spot package
+    is imported.
+
+### Roadmap
+
+  - **v2.0.0-m1** (this tag): scaffolding only.
+  - **v2.0.0-m2**: MarketData (symbols / tickers / orderbook /
+                   candles / fills) + Trading (place / amend /
+                   cancel; single + batch). REST only.
+  - **v2.0.0-m3**: Account (balance / info) + Trading history
+                   (open / history / fills).
+  - **v2.0.0-m4**: public WebSocket (books with CRC32 resync via the
+                   shared `internal/bgcommon/orderbook` engine,
+                   ticker, trade, candles).
+  - **v2.0.0-m5**: private WebSocket (account / orders / fills) with
+                   login + auto-resub via `internal/ws.Conn`.
+  - **v2.0.0**:    aggregate release once M2..M5 land.
+
 ## v1.2.2 — 2026-05-28
 
 ### Changed (internal — no public API change)
