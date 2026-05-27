@@ -86,6 +86,64 @@ const (
 // Passing any actual symbol yields code=30001 "...doesn't exist".
 const instIDDefaultPrivate = "default"
 
+/*
+flexString accepts either a JSON string or a JSON number / JSON null
+and stores the canonical decimal representation as a string.
+
+WHY:
+The Bitget V2 docs describe every numeric field on the private
+orders / positions / account / fill channels as a quoted string
+("size":"0.5", "price":"50000", "leverage":"5"), but the live
+server is inconsistent: at least the positions channel emits
+`leverage` as a JSON number on snapshots (observed in production
+PARTIUSDT field log under v1.2.0:
+`...openPriceAvg":"0.084501465025","leverage":5,"achievedProfits":"0"...`).
+A plain `string`-typed field then makes jsoniter abort the WHOLE
+row with `ReadString: expects " or n, but found 5`, the
+positions push gets dropped, and inventory updates fall back to
+REST polling — the exact UX we shipped flexCode to fix on the
+login envelope.
+
+flexString is the same idea generalised: accept both wire shapes,
+canonicalise to a decimal-string for the existing
+parseDecimalOrZero / parseInt64OrZero / parseIntOrZero helpers
+to consume. Numeric input is kept as raw bytes (so "5", "0.084501",
+"-1128.50454" round-trip identically) and `null` collapses to "".
+
+WHERE IT'S APPLIED:
+Every numeric / timestamp field on wsOrderRow / wsPositionRow /
+wsAccountRow. Identifier fields (instId, orderId, clientOid, side,
+tradeSide, marginMode, ...) stay as plain `string` because Bitget
+has no incentive to emit them numerically and the looser parse
+would mask actual server bugs.
+*/
+type flexString string
+
+// UnmarshalJSON makes flexString a json.Unmarshaler. The std lib
+// and jsoniter both honour this hook on reflection-based decoding.
+func (s *flexString) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*s = ""
+		return nil
+	}
+	if data[0] == '"' && data[len(data)-1] == '"' {
+		var unquoted string
+		if err := codec.Unmarshal(data, &unquoted); err != nil {
+			return err
+		}
+		*s = flexString(unquoted)
+		return nil
+	}
+	// Numeric (int / float / scientific notation): keep raw bytes
+	// verbatim — they are already the canonical decimal string and
+	// match what the parseDecimalOrZero / parseInt* helpers expect.
+	*s = flexString(string(data))
+	return nil
+}
+
+// String returns the canonical decimal form for downstream parsing.
+func (s flexString) String() string { return string(s) }
+
 // privateConnState bundles every field that needs locking around the
 // private connection lifecycle. StreamClient embeds it under its own
 // privateMu so the public-side fields stay decoupled.
@@ -467,28 +525,28 @@ func (s *StreamClient) handleAccountFrame(
 //   - accBaseVolume / fillPrice / fillSize / priceAvg
 //     (REST collapses fills into baseVolume / priceAvg only).
 type wsOrderRow struct {
-	InstID         string `json:"instId"`
-	OrderID        string `json:"orderId"`
-	ClientOid      string `json:"clientOid"`
-	Side           string `json:"side"`
-	TradeSide      string `json:"tradeSide"`
-	PosSide        string `json:"posSide"`
-	OrderType      string `json:"orderType"`
-	Force          string `json:"force"`
-	Status         string `json:"status"`
-	Size           string `json:"size"`
-	Price          string `json:"price"`
-	NotionalUSD    string `json:"notionalUsd"`
-	AccBaseVolume  string `json:"accBaseVolume"`
-	PriceAvg       string `json:"priceAvg"`
-	Fee            string `json:"fee"`
-	FeeDetailRaw   string `json:"feeDetail"`
-	MarginCoin     string `json:"marginCoin"`
-	MarginMode     string `json:"marginMode"`
-	Leverage       string `json:"leverage"`
-	ReduceOnly     string `json:"reduceOnly"`
-	CTime          string `json:"cTime"`
-	UTime          string `json:"uTime"`
+	InstID         string     `json:"instId"`
+	OrderID        string     `json:"orderId"`
+	ClientOid      string     `json:"clientOid"`
+	Side           string     `json:"side"`
+	TradeSide      string     `json:"tradeSide"`
+	PosSide        string     `json:"posSide"`
+	OrderType      string     `json:"orderType"`
+	Force          string     `json:"force"`
+	Status         string     `json:"status"`
+	Size           flexString `json:"size"`
+	Price          flexString `json:"price"`
+	NotionalUSD    flexString `json:"notionalUsd"`
+	AccBaseVolume  flexString `json:"accBaseVolume"`
+	PriceAvg       flexString `json:"priceAvg"`
+	Fee            flexString `json:"fee"`
+	FeeDetailRaw   string     `json:"feeDetail"`
+	MarginCoin     string     `json:"marginCoin"`
+	MarginMode     string     `json:"marginMode"`
+	Leverage       flexString `json:"leverage"`
+	ReduceOnly     string     `json:"reduceOnly"`
+	CTime          flexString `json:"cTime"`
+	UTime          flexString `json:"uTime"`
 }
 
 // wsPositionRow mirrors one element of the "positions" data array.
@@ -497,48 +555,48 @@ type wsOrderRow struct {
 //   - instId  instead of symbol;
 //   - frozen  instead of locked.
 type wsPositionRow struct {
-	InstID           string `json:"instId"`
-	MarginCoin       string `json:"marginCoin"`
-	HoldSide         string `json:"holdSide"`
-	HoldMode         string `json:"holdMode"`
-	OpenDelegateSize string `json:"openDelegateSize"`
-	MarginSize       string `json:"marginSize"`
-	Available        string `json:"available"`
-	Frozen           string `json:"frozen"`
-	Total            string `json:"total"`
-	Leverage         string `json:"leverage"`
-	AchievedProfits  string `json:"achievedProfits"`
-	OpenPriceAvg     string `json:"openPriceAvg"`
-	MarginMode       string `json:"marginMode"`
-	UnrealizedPL     string `json:"unrealizedPL"`
-	LiquidationPrice string `json:"liquidationPrice"`
-	KeepMarginRate   string `json:"keepMarginRate"`
-	MarkPrice        string `json:"markPrice"`
-	MarginRatio      string `json:"marginRatio"`
-	BreakEvenPrice   string `json:"breakEvenPrice"`
-	CTime            string `json:"cTime"`
-	UTime            string `json:"uTime"`
+	InstID           string     `json:"instId"`
+	MarginCoin       string     `json:"marginCoin"`
+	HoldSide         string     `json:"holdSide"`
+	HoldMode         string     `json:"holdMode"`
+	OpenDelegateSize flexString `json:"openDelegateSize"`
+	MarginSize       flexString `json:"marginSize"`
+	Available        flexString `json:"available"`
+	Frozen           flexString `json:"frozen"`
+	Total            flexString `json:"total"`
+	Leverage         flexString `json:"leverage"`
+	AchievedProfits  flexString `json:"achievedProfits"`
+	OpenPriceAvg     flexString `json:"openPriceAvg"`
+	MarginMode       string     `json:"marginMode"`
+	UnrealizedPL     flexString `json:"unrealizedPL"`
+	LiquidationPrice flexString `json:"liquidationPrice"`
+	KeepMarginRate   flexString `json:"keepMarginRate"`
+	MarkPrice        flexString `json:"markPrice"`
+	MarginRatio      flexString `json:"marginRatio"`
+	BreakEvenPrice   flexString `json:"breakEvenPrice"`
+	CTime            flexString `json:"cTime"`
+	UTime            flexString `json:"uTime"`
 }
 
 // wsAccountRow mirrors one element of the "account" data array. The
 // "account" channel is per-coin: each row carries balance fields for
 // one margin coin. For USDT-FUTURES the array is length 1.
 type wsAccountRow struct {
-	MarginCoin          string `json:"marginCoin"`
-	Frozen              string `json:"frozen"`
-	Available           string `json:"available"`
-	MaxOpenPosAvail     string `json:"maxOpenPosAvailable"`
-	MaxTransferOut      string `json:"maxTransferOut"`
-	Equity              string `json:"equity"`
-	UsdtEquity          string `json:"usdtEquity"`
-	BtcEquity           string `json:"btcEquity"`
-	UnrealizedPL        string `json:"unrealizedPL"`
-	CrossedRiskRate     string `json:"crossedRiskRate"`
-	CrossedMarginLever  string `json:"crossedMarginLeverage"`
-	IsolatedLongLever   string `json:"isolatedLongLever"`
-	IsolatedShortLever  string `json:"isolatedShortLever"`
-	Locked              string `json:"locked"`
-	Coupon              string `json:"coupon"`
+	MarginCoin         string     `json:"marginCoin"`
+	Frozen             flexString `json:"frozen"`
+	Available          flexString `json:"available"`
+	MaxOpenPosAvail    flexString `json:"maxOpenPosAvailable"`
+	MaxTransferOut     flexString `json:"maxTransferOut"`
+	Equity             flexString `json:"equity"`
+	UsdtEquity         flexString `json:"usdtEquity"`
+	BtcEquity          flexString `json:"btcEquity"`
+	UnrealizedPL       flexString `json:"unrealizedPL"`
+	CrossedRiskRate    flexString `json:"crossedRiskRate"`
+	CrossedMarginLever flexString `json:"crossedMarginLeverage"`
+	IsolatedLongLever  flexString `json:"isolatedLongLever"`
+	IsolatedShortLever flexString `json:"isolatedShortLever"`
+	Locked             flexString `json:"locked"`
+	Coupon             flexString `json:"coupon"`
 }
 
 // ---------------------------------------------------------------------
@@ -559,31 +617,31 @@ func convertWSOrderRow(row wsOrderRow) (mixtypes.OrderInfo, error) {
 	}
 
 	var err error
-	out.Quantity, err = parseDecimalOrZero(row.Size)
+	out.Quantity, err = parseDecimalOrZero(string(row.Size))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("size", err)
 	}
-	out.Price, err = parseDecimalOrZero(row.Price)
+	out.Price, err = parseDecimalOrZero(string(row.Price))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("price", err)
 	}
-	out.FilledQuantity, err = parseDecimalOrZero(row.AccBaseVolume)
+	out.FilledQuantity, err = parseDecimalOrZero(string(row.AccBaseVolume))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("accBaseVolume", err)
 	}
-	out.AvgFilledPrice, err = parseDecimalOrZero(row.PriceAvg)
+	out.AvgFilledPrice, err = parseDecimalOrZero(string(row.PriceAvg))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("priceAvg", err)
 	}
-	out.CumFee, err = parseDecimalOrZero(row.Fee)
+	out.CumFee, err = parseDecimalOrZero(string(row.Fee))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("fee", err)
 	}
-	out.CreatedAtMs, err = parseInt64OrZero(row.CTime)
+	out.CreatedAtMs, err = parseInt64OrZero(string(row.CTime))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("cTime", err)
 	}
-	out.UpdatedAtMs, err = parseInt64OrZero(row.UTime)
+	out.UpdatedAtMs, err = parseInt64OrZero(string(row.UTime))
 	if err != nil {
 		return mixtypes.OrderInfo{}, wrapWSOrderParseErr("uTime", err)
 	}
@@ -599,47 +657,47 @@ func convertWSPositionRow(row wsPositionRow) (mixtypes.PositionInfo, error) {
 	}
 
 	var err error
-	out.Quantity, err = parseDecimalOrZero(row.Total)
+	out.Quantity, err = parseDecimalOrZero(string(row.Total))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("total", err)
 	}
-	out.Available, err = parseDecimalOrZero(row.Available)
+	out.Available, err = parseDecimalOrZero(string(row.Available))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("available", err)
 	}
-	out.Locked, err = parseDecimalOrZero(row.Frozen)
+	out.Locked, err = parseDecimalOrZero(string(row.Frozen))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("frozen", err)
 	}
-	out.AvgOpenPrice, err = parseDecimalOrZero(row.OpenPriceAvg)
+	out.AvgOpenPrice, err = parseDecimalOrZero(string(row.OpenPriceAvg))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("openPriceAvg", err)
 	}
-	out.MarkPrice, err = parseDecimalOrZero(row.MarkPrice)
+	out.MarkPrice, err = parseDecimalOrZero(string(row.MarkPrice))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("markPrice", err)
 	}
-	out.LiquidationPrice, err = parseDecimalOrZero(row.LiquidationPrice)
+	out.LiquidationPrice, err = parseDecimalOrZero(string(row.LiquidationPrice))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("liquidationPrice", err)
 	}
-	out.UnrealizedPnL, err = parseDecimalOrZero(row.UnrealizedPL)
+	out.UnrealizedPnL, err = parseDecimalOrZero(string(row.UnrealizedPL))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("unrealizedPL", err)
 	}
-	out.RealizedPnL, err = parseDecimalOrZero(row.AchievedProfits)
+	out.RealizedPnL, err = parseDecimalOrZero(string(row.AchievedProfits))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("achievedProfits", err)
 	}
-	out.Leverage, err = parseIntOrZero(row.Leverage)
+	out.Leverage, err = parseIntOrZero(string(row.Leverage))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("leverage", err)
 	}
-	out.CreatedAtMs, err = parseInt64OrZero(row.CTime)
+	out.CreatedAtMs, err = parseInt64OrZero(string(row.CTime))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("cTime", err)
 	}
-	out.UpdatedAtMs, err = parseInt64OrZero(row.UTime)
+	out.UpdatedAtMs, err = parseInt64OrZero(string(row.UTime))
 	if err != nil {
 		return mixtypes.PositionInfo{}, wrapWSPositionParseErr("uTime", err)
 	}
@@ -652,11 +710,11 @@ func convertWSAccountRow(row wsAccountRow) (roottypes.Balance, error) {
 	}
 
 	var err error
-	out.TotalEquity, err = parseDecimalOrZero(row.Equity)
+	out.TotalEquity, err = parseDecimalOrZero(string(row.Equity))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("equity", err)
 	}
-	out.AvailableBalance, err = parseDecimalOrZero(row.Available)
+	out.AvailableBalance, err = parseDecimalOrZero(string(row.Available))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("available", err)
 	}
@@ -665,37 +723,37 @@ func convertWSAccountRow(row wsAccountRow) (roottypes.Balance, error) {
 	// LockedBalance so downstream code does not need to know which
 	// transport delivered the row.
 	var locked decimal.Decimal
-	locked, err = parseDecimalOrZero(row.Frozen)
+	locked, err = parseDecimalOrZero(string(row.Frozen))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("frozen", err)
 	}
 	if locked.IsZero() {
 		// Some Bitget endpoints emit both; prefer the non-zero one.
-		locked, err = parseDecimalOrZero(row.Locked)
+		locked, err = parseDecimalOrZero(string(row.Locked))
 		if err != nil {
 			return roottypes.Balance{}, wrapWSAccountParseErr("locked", err)
 		}
 	}
 	out.LockedBalance = locked
 
-	out.UnrealizedPnL, err = parseDecimalOrZero(row.UnrealizedPL)
+	out.UnrealizedPnL, err = parseDecimalOrZero(string(row.UnrealizedPL))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("unrealizedPL", err)
 	}
 	out.MaintenanceMargin = decimal.Zero
 
 	var usdtEquity decimal.Decimal
-	usdtEquity, err = parseDecimalOrZero(row.UsdtEquity)
+	usdtEquity, err = parseDecimalOrZero(string(row.UsdtEquity))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("usdtEquity", err)
 	}
 	var btcEquity decimal.Decimal
-	btcEquity, err = parseDecimalOrZero(row.BtcEquity)
+	btcEquity, err = parseDecimalOrZero(string(row.BtcEquity))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("btcEquity", err)
 	}
 	var frozen decimal.Decimal
-	frozen, err = parseDecimalOrZero(row.Frozen)
+	frozen, err = parseDecimalOrZero(string(row.Frozen))
 	if err != nil {
 		return roottypes.Balance{}, wrapWSAccountParseErr("frozen2", err)
 	}

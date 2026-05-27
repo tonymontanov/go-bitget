@@ -359,6 +359,93 @@ func TestContract_WatchPositions_DefaultSymbolReceivesAll(t *testing.T) {
 	})
 }
 
+// TestContract_WatchPositions_AcceptsNumericLeverage locks down the
+// flexString regression observed on prod (PARTIUSDT, May 27 2026):
+// Bitget V2 positions snapshot shipped `leverage` as a JSON number
+// (`"leverage":5`) instead of the documented quoted string
+// (`"leverage":"5"`), and the strict string-typed wire row caused
+// jsoniter to abort decoding with
+//
+//	`mix.wsPositionRow.Leverage: ReadString: expects " or n, but found 5`.
+//
+// The handler then dropped the entire push, breaking inventory
+// updates for any account with an open position. flexString accepts
+// both shapes; this test pins it.
+func TestContract_WatchPositions_AcceptsNumericLeverage(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.PositionInfo
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchPositions(ctx, "PARTIUSDT",
+		func(p mixtypes.PositionInfo) {
+			gotMu.Lock()
+			got = append(got, p)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchPositions: %v", err)
+	}
+	<-mock.subs
+
+	// IMPORTANT: every numeric field below is sent as a JSON number,
+	// not a quoted string. This mirrors the exact wire shape captured
+	// from the live Bitget V2 server (production app.log, v1.2.0).
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
+		[]map[string]any{{
+			"instId":           "PARTIUSDT",
+			"marginCoin":       "USDT",
+			"holdSide":         "short",
+			"marginMode":       "crossed",
+			"total":            0.5,
+			"available":        0.5,
+			"frozen":           0,
+			"openPriceAvg":     0.084501465025,
+			"markPrice":        0.05627,
+			"liquidationPrice": 0.12,
+			"leverage":         5, // <-- the actual regression
+			"unrealizedPL":     -1128.50454,
+			"achievedProfits":  0,
+			"cTime":            1779897892000,
+			"uTime":            1779897893000,
+		}}, 1779897893000)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) == 1
+	})
+	gotMu.Lock()
+	defer gotMu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 PARTIUSDT row, got %d (numeric-field regression)", len(got))
+	}
+	var p mixtypes.PositionInfo = got[0]
+	if p.Symbol != "PARTIUSDT" {
+		t.Fatalf("symbol: %q", p.Symbol)
+	}
+	if p.Leverage != 5 {
+		t.Fatalf("leverage: got %d, want 5", p.Leverage)
+	}
+	if p.Quantity.String() != "0.5" {
+		t.Fatalf("total: %s", p.Quantity)
+	}
+	if p.UpdatedAtMs != 1779897893000 {
+		t.Fatalf("uTime: %d", p.UpdatedAtMs)
+	}
+}
+
 // ---------------------------------------------------------------------
 // WatchAccount.
 // ---------------------------------------------------------------------

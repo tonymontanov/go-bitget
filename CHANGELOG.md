@@ -4,6 +4,35 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.2.1 — 2026-05-27
+
+### Fixed (high-impact)
+
+- **Private `positions` / `orders` / `account` channels now decode
+  numeric-as-number fields** (e.g. `"leverage":5` instead of the
+  documented `"leverage":"5"`). Production app.log on PARTIUSDT
+  showed every positions push being aborted with
+  `mix.wsPositionRow.Leverage: ReadString: expects " or n, but found 5`,
+  silently downgrading inventory updates to REST polling (the
+  high-frequency desk then logged
+  `Too many reconnection attempts, will retry after periodic refresh`).
+
+  The fix mirrors the v1.1.0 `flexCode` strategy: a new `flexString`
+  type accepts both quoted-string and JSON-number wire shapes,
+  canonicalises to the decimal string the existing
+  `parseDecimalOrZero` / `parseInt*OrZero` helpers expect, and is
+  applied to **every** numeric / timestamp field on `wsOrderRow`,
+  `wsPositionRow`, `wsAccountRow`. Identifier fields (`instId`,
+  `orderId`, `clientOid`, `side`, `marginMode`, …) stay strict
+  `string` so genuine wire bugs are not masked.
+
+- Test:
+  - `TestContract_WatchPositions_AcceptsNumericLeverage` pins the
+    exact PARTIUSDT wire shape captured from prod (every numeric
+    field — `total`, `available`, `markPrice`, `openPriceAvg`,
+    `unrealizedPL`, `leverage`, `cTime`, `uTime` — sent as JSON
+    number).
+
 ## v1.2.0 — 2026-05-26
 
 ### Fixed (high-impact)
