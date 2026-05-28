@@ -45,7 +45,6 @@ package mix
 
 import (
 	"context"
-	"strconv"
 	"sync"
 	"time"
 
@@ -392,7 +391,7 @@ func (s *StreamClient) handleBooksFrame(
 	}
 
 	// Bitget ships data as a single-element array even on push frames.
-	var rows []orderbookFrame
+	var rows []bgcommon.OrderbookFrame
 	if err := codec.Unmarshal(payload, &rows); err != nil {
 		s.surfaceError(errHandler, "WatchOrderbook", "decode books frame", err)
 		return
@@ -403,7 +402,7 @@ func (s *StreamClient) handleBooksFrame(
 
 	// Use the per-row timestamp when present (older Bitget builds populate
 	// the per-row ts string, newer ones rely on the envelope ts).
-	var row orderbookFrame = rows[0]
+	var row bgcommon.OrderbookFrame = rows[0]
 	var rowTsMs int64 = tsMs
 	if v, _ := bgcommon.ParseInt64OrZero(row.Ts); v > 0 {
 		rowTsMs = v
@@ -485,7 +484,7 @@ func (s *StreamClient) handleTradesFrame(
 	if len(payload) == 0 {
 		return
 	}
-	var rows []tradeFrame
+	var rows []bgcommon.TradeFrame
 	if err := codec.Unmarshal(payload, &rows); err != nil {
 		s.surfaceError(errHandler, "WatchTrades", "decode trade frame", err)
 		return
@@ -494,7 +493,7 @@ func (s *StreamClient) handleTradesFrame(
 	for i = 0; i < len(rows); i++ {
 		var u roottypes.TradeUpdate
 		var err error
-		u, err = convertTradeFrame(symbol, rows[i])
+		u, err = bgcommon.ParseTradeFrame(symbol, rows[i])
 		if err != nil {
 			s.surfaceError(errHandler, "WatchTrades", "parse trade row", err)
 			continue
@@ -524,7 +523,7 @@ func (s *StreamClient) handleKlineFrame(
 	for i = 0; i < len(rows); i++ {
 		var u roottypes.KlineUpdate
 		var err error
-		u, err = convertKlineRow(symbol, tf, rows[i])
+		u, err = bgcommon.ParseCandleRow(symbol, tf, rows[i])
 		if err != nil {
 			s.surfaceError(errHandler, "WatchKline", "parse candle row", err)
 			continue
@@ -583,14 +582,13 @@ func (s *StreamClient) scheduleResync(arg ws.SubscriptionArg) {
 // ---------------------------------------------------------------------
 // Wire structs (decoded with codec.Unmarshal).
 // ---------------------------------------------------------------------
-
-// orderbookFrame mirrors one element of the "books" channel data array.
-type orderbookFrame struct {
-	Asks     [][]string `json:"asks"`
-	Bids     [][]string `json:"bids"`
-	Checksum int64      `json:"checksum"`
-	Ts       string     `json:"ts"`
-}
+//
+// The "books" and "trade" channel shapes are identical across mix
+// and spot, so the decoder structs (OrderbookFrame, TradeFrame) live
+// in internal/bgcommon and are reused verbatim. Only the ticker
+// shape differs (mix carries markPrice / indexPrice / fundingRate /
+// nextFundingTime; spot carries 24h roll-ups instead) — that struct
+// stays profile-local.
 
 // tickerFrame mirrors one element of the "ticker" channel data array.
 // Field names follow the Bitget V2 wire (camelCase). The WS shape is
@@ -609,15 +607,6 @@ type tickerFrame struct {
 	FundingRate       string `json:"fundingRate"`
 	NextFundingTimeMs string `json:"nextFundingTime"`
 	Ts                string `json:"ts"`
-}
-
-// tradeFrame mirrors one element of the "trade" channel data array.
-type tradeFrame struct {
-	Ts      string `json:"ts"`
-	Price   string `json:"price"`
-	Size    string `json:"size"`
-	Side    string `json:"side"`
-	TradeID string `json:"tradeId"`
 }
 
 // ---------------------------------------------------------------------
@@ -662,99 +651,6 @@ func convertTickerFrame(symbol string, t tickerFrame) mixtypes.MarketTicker {
 		NextFundingTimeMs: nextFundingMs,
 		TsMs:              tsMs,
 	}
-}
-
-func convertTradeFrame(symbol string, t tradeFrame) (roottypes.TradeUpdate, error) {
-	var price decimal.Decimal
-	var size decimal.Decimal
-	var err error
-	price, err = bgcommon.ParseDecimalOrZero(t.Price)
-	if err != nil {
-		return roottypes.TradeUpdate{}, err
-	}
-	size, err = bgcommon.ParseDecimalOrZero(t.Size)
-	if err != nil {
-		return roottypes.TradeUpdate{}, err
-	}
-	var side roottypes.SideType
-	switch t.Side {
-	case "buy":
-		side = roottypes.SideTypeBuy
-	case "sell":
-		side = roottypes.SideTypeSell
-	default:
-		side = roottypes.SideType(t.Side)
-	}
-	var tsMs int64
-	tsMs, _ = bgcommon.ParseInt64OrZero(t.Ts)
-	return roottypes.TradeUpdate{
-		Symbol:  symbol,
-		Price:   price,
-		Size:    size,
-		Side:    side,
-		TradeID: t.TradeID,
-		TsMs:    tsMs,
-	}, nil
-}
-
-// convertKlineRow turns one candle row from the wire into a KlineUpdate.
-// Bitget V2 candle wire format is the SAME 7-element array everywhere:
-// [openTime, open, high, low, close, baseVolume, quoteVolume].
-//
-// The WS push does not flag closed bars explicitly; Bitget ships the
-// in-progress bar repeatedly with the same openTime, then a frame with
-// the next openTime starts the new bar. The SDK reports Confirmed=false
-// uniformly — closure detection is the consumer's responsibility (it
-// already needs the closed-bar logic for backfill mismatches).
-func convertKlineRow(symbol string, tf roottypes.Timeframe, row []string) (roottypes.KlineUpdate, error) {
-	if len(row) < 7 {
-		return roottypes.KlineUpdate{}, bitget.NewError(bitget.ErrorKindUnknown, "",
-			"mix.Stream.WatchKline: row arity "+strconv.Itoa(len(row))+" < 7", nil)
-	}
-	var openMs int64
-	var err error
-	openMs, err = bgcommon.ParseInt64OrZero(row[0])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	var open, high, low, close, volume, turnover decimal.Decimal
-	open, err = bgcommon.ParseDecimalOrZero(row[1])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	high, err = bgcommon.ParseDecimalOrZero(row[2])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	low, err = bgcommon.ParseDecimalOrZero(row[3])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	close, err = bgcommon.ParseDecimalOrZero(row[4])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	volume, err = bgcommon.ParseDecimalOrZero(row[5])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	turnover, err = bgcommon.ParseDecimalOrZero(row[6])
-	if err != nil {
-		return roottypes.KlineUpdate{}, err
-	}
-	return roottypes.KlineUpdate{
-		Symbol:    symbol,
-		Interval:  tf,
-		StartMs:   openMs,
-		EndMs:     0,
-		Open:      open,
-		High:      high,
-		Low:       low,
-		Close:     close,
-		Volume:    volume,
-		Turnover:  turnover,
-		Confirmed: false,
-	}, nil
 }
 
 // ---------------------------------------------------------------------
