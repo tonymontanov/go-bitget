@@ -4,6 +4,128 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0-m2 — 2026-05-28
+
+Second milestone of the **v2.0 SPOT** profile. Wires the REST market-
+data and trading endpoints. `mix/` is unaffected on the wire; an
+internal refactor (see "Internal" below) lifts a few profile-agnostic
+helpers into `internal/bgcommon` so that `spot/` and `mix/` share a
+single source of truth instead of running parallel copy-paste.
+
+### Added
+
+- **`spot/types/` request/response shapes** wired for M2:
+  - `SymbolInfo` — instrument spec (no productType / leverage; adds
+    `QuoteStep` for market-buy quote-side denominated size).
+  - `MarketTicker` — composite price snapshot (no markPrice /
+    indexPrice / fundingRate; adds 24h roll-ups: high24h, low24h,
+    open, openUtc, baseVolume, quoteVolume, usdtVolume, change24h,
+    changeUtc24h).
+  - `CreateOrderRequest` — no TradeSide / ReduceOnly. The doc
+    comment pins the spot quirk that `Quantity` is QUOTE-side for
+    market BUYs and BASE-side for everything else.
+  - `ModifyOrderRequest` — same identification shape as mix; SDK
+    auto-fills `NewClientOrderID` with `s-<32-hex>` when empty
+    (mix uses `m-<32-hex>` — both share `bgcommon.GenClientOid`).
+  - `OrderInfo` — no HoldSide / TradeSide / leverage.
+  - `BatchOrderResult` — same shape as mix's, profile-local because
+    `Order` is `*spot.types.OrderInfo`.
+
+- **`spot.MarketDataClient` (REST market data)** — wires four
+  endpoints. None require auth; all run through the shared rate-
+  limited `bgcommon.RestDoer`.
+  - `GetSymbolInfo(symbol)` → `GET /api/v2/spot/public/symbols`.
+    Empty / not-found symbols surface as `ErrorKindInvalidRequest`.
+    Derives `PriceTick` / `SizeStep` / `QuoteStep` from precision
+    counts (`10^-precision`, no `priceEndStep` multiplier — that
+    only exists on mix).
+  - `GetOrderBook(symbol, depth)` → `GET /api/v2/spot/market/orderbook`.
+    Numeric `limit` (1..150); `depth ≤ 0 → 50`. `type=step0` is
+    pinned (native tick precision).
+  - `GetMarketTicker(symbol)` → `GET /api/v2/spot/market/tickers`.
+    Maps every 24h roll-up the venue exposes.
+  - `GetHistoricalCandles(symbol, timeframe, length)` and
+    `GetHistoricalCandles1m(symbol, length)` →
+    `GET /api/v2/spot/market/candles`. `length ≤ 0 → 100`,
+    capped at 200 (spot ships an 8-element row; the shared
+    `bgcommon.ParseCandles` ignores the optional 8th column so
+    one parser handles both mix and spot).
+
+- **`spot.TradingClient` (REST trading)** — wires every single +
+  batch place / amend / cancel endpoint:
+  - `CreateOrder(req)` → `POST /api/v2/spot/trade/place-order`.
+  - `CreateBatchOrders(reqs)` → `POST /api/v2/spot/trade/batch-orders`.
+    Per-symbol (homogeneous symbol, validated client-side); collates
+    `successList` / `failureList` into a slice ordered to match
+    the request slice (matched by `clientOid`, positional fallback
+    when `clientOid` is empty).
+  - `ModifyOrder(req)` → `POST /api/v2/spot/trade/cancel-replace-order`.
+    Same Bitget quirk as mix: `newClientOid` is REQUIRED and MUST
+    differ from the existing `clientOid`. SDK auto-fills with
+    `bgcommon.GenClientOid("s-")` when the caller leaves it empty
+    and rejects accidental duplicates client-side
+    (`ErrorKindInvalidRequest`) before they round-trip into a
+    code=40786 from the venue.
+  - **`ModifyBatchOrders(reqs)` → `POST /api/v2/spot/trade/batch-cancel-replace-order`**.
+    **NATIVE endpoint on spot** — single REST RPC, no client-side
+    fan-out (mix has no batch-modify endpoint and falls back to N
+    `ModifyOrder` calls; spot does not). Spot's batch-cancel-replace
+    accepts MIXED symbols, so the SDK does not enforce homogeneous
+    symbol on this method.
+  - `CancelOrder(req)` → `POST /api/v2/spot/trade/cancel-order`.
+  - `CancelBatchOrders(reqs)` → `POST /api/v2/spot/trade/cancel-batch-orders`.
+  - **`CancelAllOrders(symbol)` → `POST /api/v2/spot/trade/cancel-symbol-order`**.
+    Bitget V2 spot has NO cross-symbol cancel-all endpoint (mix
+    does); empty `symbol` surfaces as `ErrorKindInvalidRequest`.
+
+- **Contract tests** on a local `httptest.Server` for every wired
+  endpoint:
+  - `spot/contract_test.go` — market-data parsing, depth clamp,
+    ASC-order kline preservation, "no productType on the wire"
+    regression guards.
+  - `spot/trading_contract_test.go` — body shape (no
+    productType / marginMode / marginCoin / tradeSide), happy-
+    path orderId echo, batch collation (mixed success / failure),
+    heterogeneous-symbol rejection, native batch-cancel-replace
+    is hit EXACTLY ONCE per call (the architectural promise vs.
+    mix's fan-out), `s-` prefix on auto-filled `newClientOid`,
+    fail-fast validation across every method.
+
+### Internal (no public API change)
+
+- **Profile-agnostic batch + clientOid helpers** lifted from `mix/`
+  into `internal/bgcommon`:
+  - `bgcommon.GenClientOid(prefix)` — collision-resistant
+    `<prefix><32-hex>` token via `crypto/rand`. `mix.genNewClientOid`
+    and `spot.genNewClientOid` are now thin wrappers (`m-` and
+    `s-` prefixes).
+  - `bgcommon.ChooseClientOid(fromVenue, fromRequest)` — pick the
+    venue-echoed value with graceful fallback to the request's
+    own. Used everywhere both profiles collate batch responses.
+  - `bgcommon.MaxBatchSize`, `bgcommon.BatchEnvelope`,
+    `bgcommon.BatchSuccessRow`, `bgcommon.BatchFailureRow`,
+    `bgcommon.ValidateBatchSize(label, n)` — the Bitget V2 batch
+    response envelope and 50-row cap apply uniformly across mix /
+    spot / future uta. `mix/trading.go` was rewired through these
+    types; the legacy `validateBatchSize` is now a thin wrapper that
+    preserves the existing error-message prefix
+    (`"mix.Trading.<Method>"`) so logs and tests stay byte-stable.
+- `mix/account.go::ClosePosition` was rewired through
+  `bgcommon.BatchEnvelope` / `BatchFailureRow` (it already decoded
+  the same shape; no behaviour change).
+
+### Roadmap
+
+  - **v2.0.0-m2** (this tag): MarketData + Trading REST.
+  - **v2.0.0-m3**: Account (balance / info) + history queries
+                   (open orders / order history / fills).
+  - **v2.0.0-m4**: public WebSocket (books with CRC32 resync via
+                   the shared `internal/bgcommon/orderbook` engine,
+                   ticker, trade, candles).
+  - **v2.0.0-m5**: private WebSocket (account / orders / fills)
+                   with login + auto-resub via `internal/ws.Conn`.
+  - **v2.0.0**:    aggregate release once M3..M5 land.
+
 ## v2.0.0-m1 — 2026-05-28
 
 First milestone of the **v2.0 SPOT** profile. Functional behaviour does

@@ -658,12 +658,12 @@ func (a *AccountClient) ClosePosition(ctx context.Context, symbol string) error 
 	// close-positions returns a {successList, failureList} envelope —
 	// reusing the batch shape from trading.go. Any failure row surfaces
 	// as a typed exchange error.
-	var data batchOrderResp
+	var data bgcommon.BatchEnvelope
 	if err = resp.UnmarshalData(&data); err != nil {
 		return bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Account.ClosePosition: parse", err)
 	}
 	if len(data.FailureList) > 0 {
-		var f batchOrderFailure = data.FailureList[0]
+		var f bgcommon.BatchFailureRow = data.FailureList[0]
 		return bitget.NewError(bitget.ErrorKindExchange, f.ErrorCode,
 			"mix.Account.ClosePosition: "+f.ErrorMsg, nil)
 	}

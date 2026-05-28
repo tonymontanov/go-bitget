@@ -76,53 +76,24 @@ package mix
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/shopspring/decimal"
 
 	bitget "github.com/tonymontanov/go-bitget/v2"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
 	"github.com/tonymontanov/go-bitget/v2/internal/rest"
 	mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
 )
 
-// timeNowNano returns the current monotonic time in nanoseconds.
-// Indirected through a var so tests can stub determinism if needed.
-var timeNowNano = func() int64 { return time.Now().UnixNano() }
-
 // genNewClientOid produces a venue-acceptable clientOid for the
 // modified order when the caller did not provide one. Format
 // `m-<32-hex>` (34 chars total, well under Bitget's 50-char cap).
-//
-// Why crypto/rand: this is the only generator already linked into
-// the standard library that gives a collision-resistant token
-// without pulling a UUID dep. The hex output is monotonically safe
-// across goroutines (no shared state) and deterministic-shaped, so
-// log greps and idempotency caches stay simple.
-//
-// On the (extremely unlikely) read failure from /dev/urandom we
-// degrade to a timestamp-derived ID rather than returning an error
-// — modify must not refuse to ship just because the OS RNG
-// momentarily glitched.
-func genNewClientOid() string {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		// Fallback: nanoseconds-since-epoch hex; still unique enough
-		// for clientOid purposes, and we never silently drop the
-		// modify request.
-		return "m-" + strconv.FormatInt(timeNowNano(), 16)
-	}
-	return "m-" + hex.EncodeToString(buf[:])
-}
-
-// maxBatchSize — Bitget V2 cap on batch-place-order /
-// batch-modify-order / batch-cancel-orders. Enforced client-side so
-// requests never round-trip to be rejected on the server.
-const maxBatchSize = 50
+// Backed by bgcommon.GenClientOid; the prefix discriminator keeps
+// mix-side modify IDs distinguishable from spot-side ones in logs.
+func genNewClientOid() string { return bgcommon.GenClientOid("m-") }
 
 // TradingClient — trading sub-client.
 type TradingClient struct {
@@ -201,7 +172,7 @@ func (t *TradingClient) CreateOrder(ctx context.Context, req mixtypes.CreateOrde
 	}
 	return mixtypes.OrderInfo{
 		OrderID:       data.OrderID,
-		ClientOrderID: chooseClientOid(data.ClientOid, req.ClientOrderID),
+		ClientOrderID: bgcommon.ChooseClientOid(data.ClientOid, req.ClientOrderID),
 		Symbol:        req.Symbol,
 		Side:          req.Side,
 		TradeSide:     req.TradeSide,
@@ -311,7 +282,7 @@ func (t *TradingClient) ModifyOrder(ctx context.Context, req mixtypes.ModifyOrde
 	}
 	return mixtypes.OrderInfo{
 		OrderID:       data.OrderID,
-		ClientOrderID: chooseClientOid(data.ClientOid, newClientOid),
+		ClientOrderID: bgcommon.ChooseClientOid(data.ClientOid, newClientOid),
 		Symbol:        req.Symbol,
 		Status:        roottypes.OrderStatusLive,
 		Quantity:      req.NewQuantity,
@@ -388,26 +359,6 @@ type batchPlaceOrderEntry struct {
 	ReduceOnly string `json:"reduceOnly,omitempty"`
 }
 
-// batchOrderResp mirrors the standard envelope used by every batch
-// trading endpoint: parallel successList / failureList of per-row
-// outcomes.
-type batchOrderResp struct {
-	SuccessList []batchOrderSuccess `json:"successList"`
-	FailureList []batchOrderFailure `json:"failureList"`
-}
-
-type batchOrderSuccess struct {
-	OrderID   string `json:"orderId"`
-	ClientOid string `json:"clientOid"`
-}
-
-type batchOrderFailure struct {
-	OrderID   string `json:"orderId"`
-	ClientOid string `json:"clientOid"`
-	ErrorMsg  string `json:"errorMsg"`
-	ErrorCode string `json:"errorCode"`
-}
-
 /*
 CreateBatchOrders submits a batch of MIX orders.
 
@@ -467,7 +418,7 @@ func (t *TradingClient) CreateBatchOrders(ctx context.Context, reqs []mixtypes.C
 		return nil, err
 	}
 
-	var data batchOrderResp
+	var data bgcommon.BatchEnvelope
 	if err = resp.UnmarshalData(&data); err != nil {
 		return nil, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Trading.CreateBatchOrders: parse", err)
 	}
@@ -647,7 +598,7 @@ func (t *TradingClient) CancelBatchOrders(ctx context.Context, reqs []roottypes.
 		return nil, err
 	}
 
-	var data batchOrderResp
+	var data bgcommon.BatchEnvelope
 	if err = resp.UnmarshalData(&data); err != nil {
 		return nil, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Trading.CancelBatchOrders: parse", err)
 	}
@@ -758,17 +709,6 @@ func buildBatchPlaceEntry(req mixtypes.CreateOrderRequest) batchPlaceOrderEntry 
 	return entry
 }
 
-// chooseClientOid returns the venue-echoed clientOid when present,
-// falling back to the request's. Bitget always echoes back the value
-// it accepted, so this is mostly a safety net for fixtures with empty
-// strings.
-func chooseClientOid(fromVenue, fromRequest string) string {
-	if fromVenue != "" {
-		return fromVenue
-	}
-	return fromRequest
-}
-
 // ---------------------------------------------------------------------
 // Helpers — validation.
 // ---------------------------------------------------------------------
@@ -815,14 +755,12 @@ func validateCancelOrderRequest(req roottypes.CancelOrderRequest) error {
 	return nil
 }
 
+// validateBatchSize is a thin wrapper that delegates to
+// bgcommon.ValidateBatchSize while preserving the legacy error
+// message prefix ("mix.Trading.<Method>") so logs and tests stay
+// stable across the v1.2.2 → v2.0 batch-helper extraction.
 func validateBatchSize(method string, n int) error {
-	if n == 0 {
-		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading."+method+": empty request slice", nil)
-	}
-	if n > maxBatchSize {
-		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "mix.Trading."+method+": batch size "+strconv.Itoa(n)+" exceeds Bitget V2 cap of "+strconv.Itoa(maxBatchSize), nil)
-	}
-	return nil
+	return bgcommon.ValidateBatchSize("mix.Trading."+method, n)
 }
 
 // decimalIsPositive returns true iff d > 0. Used by validators to
@@ -854,7 +792,7 @@ left with wrong indices.
 func collateBatchResultsFromCreate(
 	reqs []mixtypes.CreateOrderRequest,
 	clientOids []string,
-	data batchOrderResp,
+	data bgcommon.BatchEnvelope,
 	symbol string,
 ) []mixtypes.BatchOrderResult {
 	var results []mixtypes.BatchOrderResult = make([]mixtypes.BatchOrderResult, len(reqs))
@@ -870,7 +808,7 @@ func collateBatchResultsFromCreate(
 		}
 	}
 
-	var ok batchOrderSuccess
+	var ok bgcommon.BatchSuccessRow
 	var idx int = 0
 	for _, ok = range data.SuccessList {
 		var target *mixtypes.BatchOrderResult
@@ -895,7 +833,7 @@ func collateBatchResultsFromCreate(
 		}
 		var info *mixtypes.OrderInfo = &mixtypes.OrderInfo{
 			OrderID:       ok.OrderID,
-			ClientOrderID: chooseClientOid(ok.ClientOid, target.ClientOrderID),
+			ClientOrderID: bgcommon.ChooseClientOid(ok.ClientOid, target.ClientOrderID),
 			Symbol:        symbol,
 			Status:        roottypes.OrderStatusLive,
 		}
@@ -914,7 +852,7 @@ func collateBatchResultsFromCreate(
 		target.Order = info
 	}
 
-	var fail batchOrderFailure
+	var fail bgcommon.BatchFailureRow
 	idx = 0
 	for _, fail = range data.FailureList {
 		var target *mixtypes.BatchOrderResult
@@ -957,7 +895,7 @@ func collateBatchResultsFromCreate(
 func collateBatchResultsFromCancel(
 	reqs []roottypes.CancelOrderRequest,
 	clientOids []string,
-	data batchOrderResp,
+	data bgcommon.BatchEnvelope,
 	symbol string,
 ) []mixtypes.BatchOrderResult {
 	var results []mixtypes.BatchOrderResult = make([]mixtypes.BatchOrderResult, len(reqs))
@@ -973,7 +911,7 @@ func collateBatchResultsFromCancel(
 		}
 	}
 
-	var ok batchOrderSuccess
+	var ok bgcommon.BatchSuccessRow
 	var idx int = 0
 	for _, ok = range data.SuccessList {
 		var target *mixtypes.BatchOrderResult
@@ -986,7 +924,7 @@ func collateBatchResultsFromCancel(
 		}
 		var info *mixtypes.OrderInfo = &mixtypes.OrderInfo{
 			OrderID:       ok.OrderID,
-			ClientOrderID: chooseClientOid(ok.ClientOid, ""),
+			ClientOrderID: bgcommon.ChooseClientOid(ok.ClientOid, ""),
 			Symbol:        symbol,
 			Status:        roottypes.OrderStatusCancelled,
 		}
@@ -997,11 +935,11 @@ func collateBatchResultsFromCancel(
 			})
 			continue
 		}
-		info.ClientOrderID = chooseClientOid(ok.ClientOid, target.ClientOrderID)
+		info.ClientOrderID = bgcommon.ChooseClientOid(ok.ClientOid, target.ClientOrderID)
 		target.Order = info
 	}
 
-	var fail batchOrderFailure
+	var fail bgcommon.BatchFailureRow
 	idx = 0
 	for _, fail = range data.FailureList {
 		var target *mixtypes.BatchOrderResult

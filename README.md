@@ -6,7 +6,7 @@ HFT / algorithmic trading.
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
 Latest stable: **v1.2.2** — production-ready MIX (USDT-margined perps).
-Latest milestone: **v2.0.0-m1** — `spot/` scaffolding (no functional REST/WS yet; M2..M5 fill it in).
+Latest milestone: **v2.0.0-m2** — `spot/` MarketData + Trading REST (M3..M5 fill in account / WS).
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
@@ -29,7 +29,8 @@ The new **UTA (V3)** family is deferred to v2.5.
 | **M5** `mix/stream-private.go` (private WS) | done | WatchOrders / WatchPositions / WatchAccount on a lazily-dialed signed `*ws.Conn`; per-row fan-out so the caller handler is invoked once per state change; auth pre-flight returns `ErrorKindAuth` when the signer has no credentials. |
 | **v1.0 release** | done | extended error-code coverage (~115 V2 codes); runnable `examples/` (marketdata, place-order, private-stream); `CHANGELOG.md`. |
 | **v2.0-m1** `spot/` scaffolding | done | `spot.Client` + Trading / Account / MarketData / Stream sub-client stubs; factory wired into `bitget.Client.Spot()`; smoke tests pin the M1 contract. |
-| **v2.0-m2..m5** `spot/` profile | pending | M2: Trading + MarketData REST. M3: Account + history. M4: public WS (books / ticker / trade / candles) on the shared CRC32 engine. M5: private WS (account / orders / fills). |
+| **v2.0-m2** `spot/` MarketData + Trading REST | done | `MarketDataClient`: `GetSymbolInfo` / `GetOrderBook` (numeric `limit`, 1..150) / `GetMarketTicker` (24h roll-ups) / `GetHistoricalCandles` (+1m). `TradingClient`: `CreateOrder` / `ModifyOrder` / `CancelOrder` + batch (place / **native** modify / cancel, ≤50 rows) + per-symbol `CancelAllOrders` (`/cancel-symbol-order`). Native `batch-cancel-replace-order` (single REST call vs. mix client-side fan-out). `s-<32-hex>` modify-clientOid prefix. `internal/bgcommon` lifted batch + clientOid helpers (`GenClientOid` / `ChooseClientOid` / `BatchEnvelope` / `ValidateBatchSize`); `mix/` rewired through them with byte-stable error messages. Contract tests on a local `httptest.Server` pin every wired endpoint plus the "no productType / marginMode / marginCoin / tradeSide on the spot wire" regression. |
+| **v2.0-m3..m5** `spot/` profile | pending | M3: Account + history. M4: public WS (books / ticker / trade / candles) on the shared CRC32 engine. M5: private WS (account / orders / fills). |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
 ## Quick start
@@ -137,6 +138,61 @@ _ = mc.Stream().WatchAccount(streamCtx,
     func(b roottypes.Balance) { /* per-margin-coin wallet snapshot */ },
     nil,
 )
+```
+
+### Spot profile (v2.0.0-m2)
+
+The spot profile mirrors the mix shape: import the package once, then
+reach the typed sub-clients via `bitget.Client.Spot()`.
+
+```go
+import (
+    bitget "github.com/tonymontanov/go-bitget/v2"
+    "github.com/tonymontanov/go-bitget/v2/spot"
+    spottypes "github.com/tonymontanov/go-bitget/v2/spot/types"
+    roottypes "github.com/tonymontanov/go-bitget/v2/types"
+    "github.com/shopspring/decimal"
+)
+
+cfg := bitget.DefaultConfig()
+cfg.APIKey, cfg.SecretKey, cfg.Passphrase = "...", "...", "..."
+
+client, _ := bitget.NewClient(cfg)
+defer client.Close()
+
+sc := client.Spot().(*spot.Client)
+
+// REST market data — production-ready in v2.0.0-m2.
+info,    _ := sc.MarketData().GetSymbolInfo(ctx, "BTCUSDT")
+ob,      _ := sc.MarketData().GetOrderBook(ctx, "BTCUSDT", 50)
+tk,      _ := sc.MarketData().GetMarketTicker(ctx, "BTCUSDT")
+candles, _ := sc.MarketData().GetHistoricalCandles(ctx, "BTCUSDT",
+    roottypes.Timeframe1m, 100)
+
+// REST trading — production-ready in v2.0.0-m2.
+//
+// IMPORTANT: on spot, market BUY orders take Quantity in QUOTE
+// (USDT) — Bitget interprets the field as "spend this much USDT
+// at market". Limit orders and market SELLs take Quantity in BASE.
+// The SDK ships req.Quantity verbatim; conversion (if needed)
+// happens one layer up.
+placed, _ := sc.Trading().CreateOrder(ctx, spottypes.CreateOrderRequest{
+    Symbol:        "BTCUSDT",
+    Side:          roottypes.SideTypeBuy,
+    OrderType:     roottypes.OrderTypeLimit,
+    TimeInForce:   roottypes.TimeInForcePostOnly,
+    Quantity:      decimal.RequireFromString("0.001"),
+    Price:         decimal.RequireFromString("43500.5"),
+    ClientOrderID: "core-uuid-1",
+})
+
+// Native batch-cancel-replace — single REST call, no fan-out.
+results, _ := sc.Trading().ModifyBatchOrders(ctx, []spottypes.ModifyOrderRequest{
+    {Symbol: "BTCUSDT", ClientOrderID: "core-1", NewPrice: decimal.RequireFromString("43500")},
+    {Symbol: "BTCUSDT", ClientOrderID: "core-2", NewPrice: decimal.RequireFromString("43600")},
+})
+
+_ = sc.Trading().CancelAllOrders(ctx, "BTCUSDT") // per-symbol on spot.
 ```
 
 End-to-end runnable demos live under [`examples/`](./examples):
