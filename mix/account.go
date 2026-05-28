@@ -23,7 +23,7 @@ PAGINATION:
 GetOpenOrders follows Bitget's V2 cursor model: the response carries
 `endId`, the next request uses `idLessThan = endId`. The SDK pages
 internally and returns the full list in a single call. There is a hard
-ceiling (`openOrdersMaxPages * openOrdersPageLimit`) so a runaway
+ceiling (`bgcommon.OrdersMaxPages * bgcommon.OrdersPageLimit`) so a runaway
 result set cannot wedge the goroutine — the SDK surfaces a typed error
 when the ceiling is hit so the desk can decide whether to retry with a
 narrower symbol filter or to swap to a streaming reconciliation.
@@ -75,17 +75,12 @@ func newAccountClient(c *Client) *AccountClient {
 // ---------------------------------------------------------------------
 // Pagination knobs.
 // ---------------------------------------------------------------------
-
-// openOrdersPageLimit — Bitget V2 cap on a single /orders-pending
-// page. Larger values are silently clamped server-side. We pin to the
-// max to minimise round-trips.
-const openOrdersPageLimit = 100
-
-// openOrdersMaxPages — hard ceiling on internal pagination. 1000
-// orders covers every realistic market-making book; if the desk hits
-// it we want a typed error rather than an infinite loop on a buggy
-// `endId` echo.
-const openOrdersMaxPages = 10
+//
+// The 100-orders-per-page / 10-page ceiling lives in
+// internal/bgcommon (OrdersPageLimit / OrdersMaxPages) so spot/ and
+// future uta/ pagination loops use the same caps. The mix profile
+// consumes the constants via the bgcommon import; no profile-local
+// duplicate is kept.
 
 // ---------------------------------------------------------------------
 // GetAccount — /api/v2/mix/account/accounts.
@@ -424,82 +419,68 @@ type openOrdersResp struct {
 
 // GetOpenOrders returns every live order for the pinned productType,
 // optionally filtered by `symbol`. Pagination is handled internally
-// via Bitget's `idLessThan = endId` cursor model. The hard ceiling
-// (`openOrdersMaxPages * openOrdersPageLimit`) prevents a buggy or
-// adversarial cursor echo from looping forever; hitting it surfaces
-// ErrorKindUnknown so the desk can react.
+// via Bitget's `idLessThan = endId` cursor model (the shared
+// bgcommon.PaginateByCursor helper). The hard ceiling
+// (`bgcommon.OrdersMaxPages * bgcommon.OrdersPageLimit`) prevents a
+// buggy or adversarial cursor echo from looping forever; hitting it
+// surfaces ErrorKindUnknown so the desk can react.
 //
 // An empty symbol returns ALL open orders under the productType — the
 // desk uses that path for full-account reconciliation on startup.
 func (a *AccountClient) GetOpenOrders(ctx context.Context, symbol string) ([]mixtypes.OrderInfo, error) {
-	var out []mixtypes.OrderInfo
-	var idLessThan string
-	var page int
+	var rows []orderRow
+	var err error
+	rows, err = bgcommon.PaginateByCursor(ctx, "mix.Account.GetOpenOrders",
+		func(idLessThan string, limit int) ([]orderRow, string, error) {
+			var query url.Values = url.Values{}
+			query.Set("productType", string(a.c.productType))
+			if symbol != "" {
+				query.Set("symbol", symbol)
+			}
+			query.Set("limit", strconv.Itoa(limit))
+			if idLessThan != "" {
+				query.Set("idLessThan", idLessThan)
+			}
 
-	for page = 0; page < openOrdersMaxPages; page++ {
-		var query url.Values = url.Values{}
-		query.Set("productType", string(a.c.productType))
-		if symbol != "" {
-			query.Set("symbol", symbol)
-		}
-		query.Set("limit", strconv.Itoa(openOrdersPageLimit))
-		if idLessThan != "" {
-			query.Set("idLessThan", idLessThan)
-		}
+			var meta rest.RequestMeta = rest.RequestMeta{
+				Category: string(bitget.RateLimitCategoryQuery),
+			}
+			if symbol != "" {
+				meta.Symbols = []string{symbol}
+			}
 
-		var meta rest.RequestMeta = rest.RequestMeta{
-			Category: string(bitget.RateLimitCategoryQuery),
-		}
-		if symbol != "" {
-			meta.Symbols = []string{symbol}
-		}
+			var resp rest.Response
+			var ferr error
+			resp, _, ferr = a.c.rest().Do(ctx, rest.Options{
+				Method: "GET",
+				Path:   "/api/v2/mix/order/orders-pending",
+				Query:  query,
+				Signed: true,
+				Meta:   meta,
+			})
+			if ferr != nil {
+				return nil, "", ferr
+			}
 
-		var resp rest.Response
-		var err error
-		resp, _, err = a.c.rest().Do(ctx, rest.Options{
-			Method: "GET",
-			Path:   "/api/v2/mix/order/orders-pending",
-			Query:  query,
-			Signed: true,
-			Meta:   meta,
+			var data openOrdersResp
+			if ferr = resp.UnmarshalData(&data); ferr != nil {
+				return nil, "", bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Account.GetOpenOrders: parse", ferr)
+			}
+			return data.EntrustedList, data.EndID, nil
 		})
+	if err != nil {
+		return nil, err
+	}
+
+	var out []mixtypes.OrderInfo = make([]mixtypes.OrderInfo, 0, len(rows))
+	var i int
+	for i = 0; i < len(rows); i++ {
+		var info mixtypes.OrderInfo
+		info, err = convertOrderRow(rows[i])
 		if err != nil {
 			return nil, err
 		}
-
-		var data openOrdersResp
-		if err = resp.UnmarshalData(&data); err != nil {
-			return nil, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.Account.GetOpenOrders: parse", err)
-		}
-		if len(data.EntrustedList) == 0 {
-			break
-		}
-
-		var i int
-		for i = 0; i < len(data.EntrustedList); i++ {
-			var info mixtypes.OrderInfo
-			info, err = convertOrderRow(data.EntrustedList[i])
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, info)
-		}
-
-		// Stop conditions:
-		//   - server says "no more" via empty endId;
-		//   - last page returned fewer than the requested limit (no
-		//     point asking again).
-		if data.EndID == "" || len(data.EntrustedList) < openOrdersPageLimit {
-			break
-		}
-		idLessThan = data.EndID
-	}
-
-	if page == openOrdersMaxPages {
-		return nil, bitget.NewError(bitget.ErrorKindUnknown, "",
-			"mix.Account.GetOpenOrders: pagination ceiling hit ("+strconv.Itoa(openOrdersMaxPages)+
-				" pages of "+strconv.Itoa(openOrdersPageLimit)+
-				" orders); narrow by symbol or use streaming reconciliation", nil)
+		out = append(out, info)
 	}
 	return out, nil
 }
