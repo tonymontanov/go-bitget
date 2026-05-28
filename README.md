@@ -6,7 +6,7 @@ HFT / algorithmic trading.
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
 Latest stable: **v1.2.2** — production-ready MIX (USDT-margined perps).
-Latest milestone: **v2.0.0-m2** — `spot/` MarketData + Trading REST (M3..M5 fill in account / WS).
+Latest milestone: **v2.0.0-m3** — `spot/` Account + history REST (M4..M5 fill in WS).
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
@@ -30,7 +30,8 @@ The new **UTA (V3)** family is deferred to v2.5.
 | **v1.0 release** | done | extended error-code coverage (~115 V2 codes); runnable `examples/` (marketdata, place-order, private-stream); `CHANGELOG.md`. |
 | **v2.0-m1** `spot/` scaffolding | done | `spot.Client` + Trading / Account / MarketData / Stream sub-client stubs; factory wired into `bitget.Client.Spot()`; smoke tests pin the M1 contract. |
 | **v2.0-m2** `spot/` MarketData + Trading REST | done | `MarketDataClient`: `GetSymbolInfo` / `GetOrderBook` (numeric `limit`, 1..150) / `GetMarketTicker` (24h roll-ups) / `GetHistoricalCandles` (+1m). `TradingClient`: `CreateOrder` / `ModifyOrder` / `CancelOrder` + batch (place / **native** modify / cancel, ≤50 rows) + per-symbol `CancelAllOrders` (`/cancel-symbol-order`). Native `batch-cancel-replace-order` (single REST call vs. mix client-side fan-out). `s-<32-hex>` modify-clientOid prefix. `internal/bgcommon` lifted batch + clientOid helpers (`GenClientOid` / `ChooseClientOid` / `BatchEnvelope` / `ValidateBatchSize`); `mix/` rewired through them with byte-stable error messages. Contract tests on a local `httptest.Server` pin every wired endpoint plus the "no productType / marginMode / marginCoin / tradeSide on the spot wire" regression. |
-| **v2.0-m3..m5** `spot/` profile | pending | M3: Account + history. M4: public WS (books / ticker / trade / candles) on the shared CRC32 engine. M5: private WS (account / orders / fills). |
+| **v2.0-m3** `spot/` Account + history REST | done | `AccountClient`: `GetAccountInfo` (`/account/info`) / `GetAccount` (`/account/assets`, all coins) / `GetOpenOrders` (`/trade/unfilled-orders`, paginated) / `GetOrderDetail` (POST `/trade/orderInfo`) / `GetOrderHistory` (`/trade/history-orders`, paginated, time-window) / `GetFills` (`/trade/fills`, paginated by tradeId, optional orderID filter). New `bgcommon.PaginateByCursor[T]` generic helper drives every paged call (mix `GetOpenOrders` rewired through it; ceiling message byte-stable). New types: `AccountInfo`, `Fill`. Contract tests pin pagination protocol on a stateful 250-row mock (3 pages: 100+100+50, cursor = last `orderId`). |
+| **v2.0-m4..m5** `spot/` profile | pending | M4: public WS (books / ticker / trade / candles) on the shared CRC32 engine. M5: private WS (account / orders / fills). |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
 ## Quick start

@@ -4,6 +4,89 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0-m3 — 2026-05-28
+
+Third milestone of the **v2.0 SPOT** profile. Wires the authenticated
+account / history REST endpoints. The new `spot.AccountClient` mirrors
+the `mix.AccountClient` shape minus the position / leverage surface
+(spot has no positions); `mix/` is byte-stable on the wire.
+
+### Added
+
+- **`spot/types/`** — two new namespace structs:
+  - `AccountInfo` — meta about the API key's owning account (UserID,
+    InviterID, IPs, Authorities, ParentID, TraderType, ChannelCode,
+    RegisTimeMs). Used by the desk for boot-time health checks.
+  - `Fill` — one trade execution from `/spot/trade/fills` (OrderID,
+    TradeID, Symbol, Side, OrderType, FillPrice, Size, Amount,
+    TotalFee, FeeCoin, TradeScope, CreatedAtMs).
+
+- **`spot.AccountClient`** — six REST endpoints, all signed:
+  - `GetAccountInfo()` → `GET /api/v2/spot/account/info`. Surfaces
+    granted authorities + whitelisted IPs for boot-time validation.
+  - `GetAccount()` → `GET /api/v2/spot/account/assets`. Returns every
+    funded coin in `roottypes.Balance.Coins[]`. Aggregate fields
+    (`TotalEquity` / `AvailableBalance`) stay zero because spot
+    does not expose them; per-coin `Equity` is synthesised as
+    `available + frozen + locked`.
+  - `GetOpenOrders(symbol)` → `GET /api/v2/spot/trade/unfilled-orders`.
+    Cursor-paginated through `bgcommon.PaginateByCursor` (cursor =
+    last `orderId` on the page). `symbol == ""` returns ALL open
+    orders for the API key (full-account reconciliation path).
+  - `GetOrderDetail(symbol, orderID, clientOID)` →
+    **POST** `/api/v2/spot/trade/orderInfo` (the only spot account
+    endpoint that uses POST). Symbol is required client-side for
+    symmetry with mix and so the rate-limit observer sees a typed
+    Symbols list. Either OrderID or ClientOrderID is required;
+    OrderID wins when both supplied.
+  - `GetOrderHistory(symbol, startMs, endMs)` →
+    `GET /api/v2/spot/trade/history-orders`. Cursor-paginated;
+    `symbol == ""` returns history across all symbols; `startMs ==
+    0` / `endMs == 0` leaves the corresponding bound off (Bitget
+    falls back to its default look-back, ~90 days).
+  - `GetFills(symbol, orderID, startMs, endMs)` →
+    `GET /api/v2/spot/trade/fills`. Cursor-paginated by `tradeId`
+    (NOT `orderId`, on this endpoint specifically). `orderID == ""`
+    returns fills across all orders for the symbol; passing an
+    explicit orderID restricts the query.
+
+- **Contract tests** on a local `httptest.Server`:
+  - happy-path parsing for every endpoint;
+  - 250-row multi-page pagination test that pins the cursor protocol
+    (3 pages: 100 + 100 + 50 rows; verifies `idLessThan` echoes the
+    last `orderId` of the previous page);
+  - regression guards: `productType` / `marginCoin` / `marginMode` /
+    `holdSide` / `tradeSide` MUST NOT appear on any spot account
+    request;
+  - POST-vs-GET shape pin for `orderInfo` (the SDK never silently
+    flips it back to GET);
+  - fail-fast validation for `GetOrderDetail` (empty symbol /
+    no identifier).
+
+### Internal (no public API change)
+
+- **Pagination helper extracted from `mix/`** ahead of M3 (committed
+  separately in `refactor(internal/bgcommon): extract cursor-pagination helper`):
+  - `bgcommon.OrdersPageLimit = 100`
+  - `bgcommon.OrdersMaxPages = 10`
+  - `bgcommon.PaginateByCursor[T any](ctx, label, fetch) ([]T, error)`
+    — generic cursor walker shared by mix open-orders and the new
+    spot open-orders / order-history / fills endpoints.
+  - `mix/account.go::GetOpenOrders` rewired to use the helper; the
+    ceiling error message stays byte-stable
+    (`"mix.Account.GetOpenOrders: pagination ceiling hit ..."`)
+    so existing tests / log greps remain valid.
+
+### Roadmap
+
+  - **v2.0.0-m3** (this tag): Account + history REST.
+  - **v2.0.0-m4**: public WebSocket (books with CRC32 resync via
+                   the shared `internal/bgcommon/orderbook` engine,
+                   ticker, trade, candles).
+  - **v2.0.0-m5**: private WebSocket (account / orders / fills)
+                   with login + auto-resub via `internal/ws.Conn`.
+  - **v2.0.0**:    aggregate release once M4..M5 land.
+
 ## v2.0.0-m2 — 2026-05-28
 
 Second milestone of the **v2.0 SPOT** profile. Wires the REST market-
