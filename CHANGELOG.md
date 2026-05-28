@@ -4,6 +4,81 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0-m4 — 2026-05-28
+
+Fourth milestone of the **v2.0 SPOT** profile. Wires the public
+WebSocket surface — the high-throughput feed every market-making
+strategy depends on.
+
+### Added
+
+- **`spot.StreamClient`** — four `Watch*` primitives, all multiplexed
+  on a single lazily-constructed `*ws.Conn` (`cfg.WS.PublicURL`,
+  shared with mix and future uta):
+  - `WatchOrderbook(ctx, symbol, handler, errHandler)` →
+    channel `books`. Full-depth feed driven by the shared
+    `internal/bgcommon/orderbook.Engine` — Bitget CRC32 is
+    validated on every applied delta. On checksum mismatch the
+    SDK surfaces `ErrChecksum` to `errHandler` and schedules an
+    Unsubscribe→Subscribe round-trip in the background; the
+    `*ws.Subscription` is reused so the user handler keeps
+    receiving frames seamlessly after the resync.
+  - `WatchTicker(ctx, symbol, handler, errHandler)` → channel
+    `ticker`. Decodes the spot-specific 24h roll-up fields
+    (`open24h` / `high24h` / `low24h` / `openUtc` / `change24h` /
+    `changeUtc24h` / `baseVolume` / `quoteVolume` / `usdtVolume`)
+    plus best bid/ask price + size. Unlike the mix shape there
+    are no `markPrice` / `indexPrice` / `fundingRate` fields —
+    spot has no equivalent.
+  - `WatchTrades(ctx, symbol, handler, errHandler)` → channel
+    `trade`. Bitget ships trade batches; the SDK fans them out
+    so the handler sees one `roottypes.TradeUpdate` per fill.
+    Buy/sell sides are normalised to `roottypes.SideTypeBuy` /
+    `SideTypeSell`; unknown values pass through verbatim
+    (forward-compat).
+  - `WatchKline(ctx, symbol, timeframe, handler, errHandler)` →
+    channel `candle{tf}`. 7-element row decoder is shared with
+    mix via `bgcommon.ParseCandleRow`. The wire does not flag
+    closed bars — the SDK ships `Confirmed=false` uniformly and
+    consumers detect closure by comparing `StartMs`.
+
+- **Spot WS subscribe arg pins `instType="SPOT"`** for every
+  channel (`books` / `ticker` / `trade` / `candle{tf}`). The
+  contract-test suite asserts this on every `Watch*` to prevent
+  a future hand-edit from copy-pasting the mix product type.
+
+- **Contract tests** on a local `httptest.Server` upgrading to a
+  TEXT-frame WebSocket:
+  - `WatchOrderbook` snapshot + delta;
+  - checksum-mismatch → unsubscribe + resubscribe round-trip;
+  - ticker 24h roll-up field mapping (regression guard against
+    accidental mix-shape contamination);
+  - trade fan-out + side normalisation;
+  - kline row decoding;
+  - fail-fast validation on every `Watch*` (empty symbol, nil
+    handler, empty timeframe).
+
+### Internal (no public API change)
+
+- **WS wire shapes extracted from `mix/`** ahead of M4 (committed
+  separately in `refactor(internal/bgcommon): extract WS books / trade / candle frames`):
+  - `bgcommon.OrderbookFrame` — books-channel row decoder.
+  - `bgcommon.TradeFrame` — trade-channel row decoder.
+  - `bgcommon.ParseTradeFrame(symbol, frame) → TradeUpdate` — generic.
+  - `bgcommon.ParseCandleRow(symbol, tf, row) → KlineUpdate` — generic.
+  - `mix/stream.go` rewired through them; the `tickerFrame` shape
+    stays profile-local because mix carries `markPrice` /
+    `indexPrice` / `fundingRate` while spot carries 24h roll-ups
+    — a shared shape would force always-zero fields on one side.
+
+### Roadmap
+
+  - **v2.0.0-m4** (this tag): public WebSocket — books / ticker /
+                  trade / candles — on `instType="SPOT"`.
+  - **v2.0.0-m5**: private WebSocket (account / orders / fills)
+                  with login + auto-resub via `internal/ws.Conn`.
+  - **v2.0.0**:    aggregate release once M5 lands.
+
 ## v2.0.0-m3 — 2026-05-28
 
 Third milestone of the **v2.0 SPOT** profile. Wires the authenticated
