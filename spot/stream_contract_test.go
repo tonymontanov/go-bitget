@@ -727,3 +727,120 @@ func asBitgetError(err error, dst **bitget.Error) bool {
 	}
 	return false
 }
+
+// ---------------------------------------------------------------------
+// Context cancel — Watch* unsubscribes when caller's ctx fires.
+// ---------------------------------------------------------------------
+
+func TestContract_Spot_ContextCancel_TriggersUnsubscribe(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makeStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+
+	var err error = c.Stream().WatchTrades(ctx, "BTCUSDT",
+		func(roottypes.TradeUpdate) {},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchTrades: %v", err)
+	}
+
+	// Drain the subscribe op so the channel is empty before we cancel.
+	select {
+	case sub := <-mock.subs:
+		if sub["channel"] != "trade" || sub["instId"] != "BTCUSDT" {
+			t.Fatalf("unexpected subscribe arg: %#v", sub)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("subscribe not received")
+	}
+
+	cancel()
+
+	// detachOnContextDone must Unsubscribe on the underlying conn.
+	select {
+	case un := <-mock.unsubs:
+		if un["channel"] != "trade" || un["instId"] != "BTCUSDT" {
+			t.Fatalf("unexpected unsubscribe arg: %#v", un)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("unsubscribe not observed after ctx cancel")
+	}
+}
+
+// ---------------------------------------------------------------------
+// Ticker — parse failure surfaces through errHandler.
+// ---------------------------------------------------------------------
+
+func TestContract_Spot_WatchTicker_ParseErrorSurfacesAndSkipsRow(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makeStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got = make(chan spottypes.MarketTicker, 1)
+	var errs []error
+	var errsMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchTicker(ctx, "BTCUSDT",
+		func(tk spottypes.MarketTicker) {
+			select {
+			case got <- tk:
+			default:
+			}
+		},
+		func(e error) {
+			errsMu.Lock()
+			errs = append(errs, e)
+			errsMu.Unlock()
+		},
+	)
+	if err != nil {
+		t.Fatalf("WatchTicker: %v", err)
+	}
+	<-mock.subs
+
+	// Push a row whose `lastPr` is non-empty but unparseable. The
+	// SDK must surface a typed error to errHandler and SKIP the
+	// handler — feeding the desk a half-zeroed snapshot would mask
+	// a genuine protocol break.
+	mock.pushFrame(t, "snapshot", "ticker", "BTCUSDT",
+		[]map[string]any{{
+			"instId":      "BTCUSDT",
+			"lastPr":      "not-a-number",
+			"bidPr":       "50000",
+			"askPr":       "50001",
+			"baseVolume":  "1234.5",
+			"quoteVolume": "61725000",
+			"ts":          "1700000000000",
+		}}, 1700000000000)
+
+	waitFor(t, time.Second, func() bool {
+		errsMu.Lock()
+		defer errsMu.Unlock()
+		return len(errs) >= 1
+	})
+	errsMu.Lock()
+	defer errsMu.Unlock()
+	if len(errs) == 0 {
+		t.Fatalf("errHandler not called on ticker parse failure")
+	}
+	// And the user handler must NOT have been invoked for that row.
+	select {
+	case tk := <-got:
+		t.Fatalf("handler called with degraded snapshot: %+v", tk)
+	default:
+	}
+}

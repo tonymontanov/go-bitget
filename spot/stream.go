@@ -461,6 +461,13 @@ func (s *StreamClient) handleBooksFrame(
 
 // handleTickerFrame parses one "ticker" channel frame and invokes
 // the caller handler with the converted spottypes.MarketTicker.
+//
+// A parse failure on ANY numeric field surfaces the FIRST error
+// through errHandler and skips the row — symmetric with the trade /
+// kline handlers. On the live Bitget V2 wire this should never
+// happen (Bitget always emits numeric strings), but a silent
+// degrade-to-zero would mask a genuine protocol break, so we fail
+// loud rather than feed the desk a half-zeroed snapshot.
 func (s *StreamClient) handleTickerFrame(
 	symbol string,
 	payload []byte,
@@ -477,7 +484,14 @@ func (s *StreamClient) handleTickerFrame(
 	}
 	var i int
 	for i = 0; i < len(rows); i++ {
-		handler(convertTickerFrame(symbol, rows[i]))
+		var t spottypes.MarketTicker
+		var err error
+		t, err = convertTickerFrame(symbol, rows[i])
+		if err != nil {
+			s.surfaceError(errHandler, "WatchTicker", "parse ticker row", err)
+			continue
+		}
+		handler(t)
 	}
 }
 
@@ -623,55 +637,62 @@ type tickerFrame struct {
 
 // convertTickerFrame normalises one spot tickerFrame into the typed
 // snapshot the desk consumes.
-func convertTickerFrame(symbol string, t tickerFrame) spottypes.MarketTicker {
+//
+// Returns the FIRST parse error wrapped through bgerr so the handler
+// path can drop the row and surface the failure to errHandler. On
+// the live wire this never trips — Bitget always emits numeric
+// strings — but degrading silently to zero would mask a genuine
+// protocol break, hence the strict path.
+func convertTickerFrame(symbol string, t tickerFrame) (spottypes.MarketTicker, error) {
 	var resolvedSymbol string = symbol
 	if t.InstID != "" {
 		resolvedSymbol = t.InstID
 	}
 
-	var last, open24h, high24h, low24h, openUtc decimal.Decimal
-	last, _ = bgcommon.ParseDecimalOrZero(t.Last)
-	open24h, _ = bgcommon.ParseDecimalOrZero(t.Open24h)
-	high24h, _ = bgcommon.ParseDecimalOrZero(t.High24h)
-	low24h, _ = bgcommon.ParseDecimalOrZero(t.Low24h)
-	openUtc, _ = bgcommon.ParseDecimalOrZero(t.OpenUtc)
+	var out spottypes.MarketTicker = spottypes.MarketTicker{Symbol: resolvedSymbol}
+	var err error
 
-	var change24h, changeUtc24h decimal.Decimal
-	change24h, _ = bgcommon.ParseDecimalOrZero(t.Change24h)
-	changeUtc24h, _ = bgcommon.ParseDecimalOrZero(t.ChangeUtc24h)
+	// parseInto threads the FIRST error to the caller via the named
+	// `err` capture. Subsequent fields still get parsed (Zero on
+	// empty / failure) so the partial struct is non-junk for
+	// debugging — only the return is gated on err != nil.
+	parseDec := func(field, raw string, dst *decimal.Decimal) {
+		var v decimal.Decimal
+		var perr error
+		v, perr = bgcommon.ParseDecimalOrZero(raw)
+		if perr != nil && err == nil {
+			err = bitget.NewError(bitget.ErrorKindUnknown, "", "spot.Stream.WatchTicker: parse "+field, perr)
+		}
+		*dst = v
+	}
 
-	var bid, bidSz, ask, askSz decimal.Decimal
-	bid, _ = bgcommon.ParseDecimalOrZero(t.BidPr)
-	bidSz, _ = bgcommon.ParseDecimalOrZero(t.BidSz)
-	ask, _ = bgcommon.ParseDecimalOrZero(t.AskPr)
-	askSz, _ = bgcommon.ParseDecimalOrZero(t.AskSz)
-
-	var baseVol, quoteVol, usdtVol decimal.Decimal
-	baseVol, _ = bgcommon.ParseDecimalOrZero(t.BaseVolume)
-	quoteVol, _ = bgcommon.ParseDecimalOrZero(t.QuoteVolume)
-	usdtVol, _ = bgcommon.ParseDecimalOrZero(t.UsdtVolume)
+	parseDec("lastPr", t.Last, &out.LastPrice)
+	parseDec("open24h", t.Open24h, &out.Open)
+	parseDec("high24h", t.High24h, &out.High24h)
+	parseDec("low24h", t.Low24h, &out.Low24h)
+	parseDec("openUtc", t.OpenUtc, &out.OpenUtc)
+	parseDec("change24h", t.Change24h, &out.Change24h)
+	parseDec("changeUtc24h", t.ChangeUtc24h, &out.ChangeUtc24h)
+	parseDec("bidPr", t.BidPr, &out.BidPrice)
+	parseDec("bidSz", t.BidSz, &out.BidSize)
+	parseDec("askPr", t.AskPr, &out.AskPrice)
+	parseDec("askSz", t.AskSz, &out.AskSize)
+	parseDec("baseVolume", t.BaseVolume, &out.BaseVolume)
+	parseDec("quoteVolume", t.QuoteVolume, &out.QuoteVolume)
+	parseDec("usdtVolume", t.UsdtVolume, &out.UsdtVolume)
 
 	var tsMs int64
-	tsMs, _ = bgcommon.ParseInt64OrZero(t.Ts)
-
-	return spottypes.MarketTicker{
-		Symbol:       resolvedSymbol,
-		LastPrice:    last,
-		AskPrice:     ask,
-		AskSize:      askSz,
-		BidPrice:     bid,
-		BidSize:      bidSz,
-		High24h:      high24h,
-		Low24h:       low24h,
-		Open:         open24h,
-		OpenUtc:      openUtc,
-		BaseVolume:   baseVol,
-		QuoteVolume:  quoteVol,
-		UsdtVolume:   usdtVol,
-		Change24h:    change24h,
-		ChangeUtc24h: changeUtc24h,
-		TsMs:         tsMs,
+	var tsErr error
+	tsMs, tsErr = bgcommon.ParseInt64OrZero(t.Ts)
+	if tsErr != nil && err == nil {
+		err = bitget.NewError(bitget.ErrorKindUnknown, "", "spot.Stream.WatchTicker: parse ts", tsErr)
 	}
+	out.TsMs = tsMs
+
+	if err != nil {
+		return spottypes.MarketTicker{}, err
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------
