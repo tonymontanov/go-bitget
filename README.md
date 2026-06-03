@@ -7,12 +7,13 @@ Module path: `github.com/tonymontanov/go-bitget/v2`
 
 Latest stable: **v1.2.2** — production-ready MIX (USDT-margined perps).
 Latest milestone: **v2.0.0-m6** — mix↔spot private-WS symmetry. Closes `spot.WatchAccount` (per-asset shape) + `spot.WatchFills` + `mix.WatchFills`. Shared `bgcommon.WSFeeDetail` parser unifies the only piece of the fill push that's byte-identical across profiles.
-See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
+Pending GA: **v2.0.0** — SPOT GA roll-up of `m1`–`m6` (spot examples + `examples/spot-smoke` harness; error-code + parity audit). See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
 
 `v1.0` covers the **MIX (USDT-margined perpetuals)** category end-to-end.
-Spot work has begun under **v2.0** (scaffolding shipped in v2.0.0-m1).
+**SPOT** is feature-complete under **v2.0** (`m1`–`m6`) and at the GA
+roll-up stage (runnable spot examples + live smoke harness shipped).
 The new **UTA (V3)** family is deferred to v2.5.
 
 | Module | Status | Notes |
@@ -229,6 +230,8 @@ _ = sc.Stream().WatchFills(streamCtx, "BTCUSDT",
 
 End-to-end runnable demos live under [`examples/`](./examples):
 
+MIX (v1.0):
+
 - [`examples/marketdata`](./examples/marketdata) — public REST + WS
   orderbook (no creds).
 - [`examples/place-order`](./examples/place-order) — signed REST: place
@@ -236,7 +239,23 @@ End-to-end runnable demos live under [`examples/`](./examples):
 - [`examples/private-stream`](./examples/private-stream) — signed WS:
   subscribe to orders / positions / account for a symbol.
 
-Run with `go run ./examples/<name>`.
+SPOT (v2.0):
+
+- [`examples/spot-marketdata`](./examples/spot-marketdata) — public REST
+  + WS orderbook (no creds).
+- [`examples/spot-place-order`](./examples/spot-place-order) — signed
+  REST: place a post-only LIMIT BUY 5 % below ask, inspect, then cancel.
+- [`examples/spot-private-stream`](./examples/spot-private-stream) —
+  signed WS: subscribe to orders / account / fills (no positions —
+  cash-only).
+- [`examples/spot-smoke`](./examples/spot-smoke) — production-readiness
+  smoke harness: runs the full go-live checklist (public REST + WS,
+  signed REST, private WS login, post-only trading round-trip) and
+  prints a `PASS` / `FAIL` / `SKIP` summary. `-read-only` skips order
+  placement; runs public-only when no credentials are set.
+
+The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
+to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 
 ## Dependencies
 

@@ -4,6 +4,68 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0 — Unreleased (SPOT GA roll-up)
+
+General-availability cut of the **v2.0 SPOT** profile. No new REST/WS
+surface beyond `v2.0.0-m6` — this release folds milestones `m1`–`m6`
+into a stable line and closes the production-readiness gaps the
+milestones left open (runnable spot examples, a live smoke harness, and
+an error-code audit). Tag is applied by the maintainer.
+
+### Fixed
+
+- **`spot.MarketData.GetHistoricalCandles` granularity (code=400171).**
+  The spot `/api/v2/spot/market/candles` endpoint rejects the
+  `roottypes.Timeframe.Wire()` tokens that MIX uses (`1m` / `1H` / `1D`)
+  with `code=400171 Parameter verification failed k-line time range`.
+  SPOT requires a different alphabet (`1min` / `1h` / `1day` / `1week`,
+  `1M` unchanged). Added a spot-local `spotCandleGranularity` mapping and
+  routed `GetHistoricalCandles` through it; MIX is untouched (still uses
+  `Wire()`), and the WS candle channel (`candle1m` / `candle1H`) is
+  unaffected — it uses the `Wire()` tokens on both profiles. Production
+  regression observed on `PARTIUSDT` (desk `candles_updater` failed to
+  load initial candles). The existing contract test had pinned the wrong
+  expectation (`1m`); it now asserts `1min`, and a new
+  `TestSpotCandleGranularity_FullTable` pins the whole alphabet.
+
+### Added
+
+- **Runnable SPOT examples** (mirror the existing MIX demos one-to-one):
+  - `examples/spot-marketdata` — public REST (`GetSymbolInfo` /
+    `GetMarketTicker` / `GetOrderBook`) + public WS `WatchOrderbook`
+    with the shared CRC32 orderbook engine. No credentials required.
+  - `examples/spot-place-order` — signed REST trading round-trip: a
+    deep post-only LIMIT BUY (`0.95*ask`, cannot cross) →
+    `GetOrderDetail` → `CancelOrder`.
+  - `examples/spot-private-stream` — signed WS `WatchOrders` /
+    `WatchAccount` / `WatchFills` (no positions — cash-only).
+  - All signed examples read the section-specific `BITGET_SPOT_*`
+    credentials, falling back to the generic `BITGET_*` triple.
+
+- **`examples/spot-smoke` — production-readiness smoke harness.** Runs
+  the full go-live checklist against the LIVE API in one shot
+  (public REST, public WS, signed REST `GetAccountInfo` / `GetAccount`,
+  private WS login, and a post-only trading round-trip) and prints a
+  `PASS` / `FAIL` / `SKIP` summary, exiting non-zero on any failure.
+  `-read-only` skips the order placement; with no credentials it runs
+  the public surface only (useful as a CI connectivity probe). This is
+  the operator hand-off point — the SDK never runs live trades on the
+  operator's behalf.
+
+### Audited (no change)
+
+- **Error-code coverage (`internal/bgerr`)** — audited against the spot
+  REST surface (order lifecycle `43xxx`, balance/wallet `50xxx`,
+  risk/quantity `45xxx`, dup-clientOid `50060`). Every code mapped in
+  `codes.go` is pinned by a row in `codes_test.go`, and unlisted codes
+  fall back to `ErrorKindExchange` by design. No additions were needed.
+
+- **SPOT ↔ MIX API parity** — confirmed: Trading (7 methods),
+  MarketData (5), public WS (4) match; the only differences are
+  intentional (spot has no positions / leverage / position-mode /
+  `ClosePosition`, and adds `GetAccountInfo` / `GetOrderHistory` /
+  `GetFills`).
+
 ## v2.0.0-m6 — 2026-06-03
 
 Sixth and final milestone of the **v2.0 SPOT** profile. Closes the

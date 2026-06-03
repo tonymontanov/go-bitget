@@ -122,7 +122,10 @@ go-bitget/
     types/             — spot-only domain types (AccountInfo, Fill, AccountUpdate, FillUpdate)
 
   uta/                 # v2.5 — Unified Trading Account (planned, not started)
-  examples/            # runnable demos: marketdata / place-order / private-stream
+  examples/            # runnable demos. MIX: marketdata / place-order /
+                       #   private-stream. SPOT: spot-marketdata /
+                       #   spot-place-order / spot-private-stream /
+                       #   spot-smoke (production-readiness harness)
   docs/                # TS-SINGLE-EXCHANGE-SDK*.md (technical spec)
 ```
 
@@ -181,10 +184,37 @@ SDK m5 private streams) are implemented and tested against the local SDK.
 
 ### 🔧 In progress / open decision
 
-- No active coding task. Last completed: `v2.0.0-m6` tag + this handoff.
-- Pending product decision on next step (options previously surfaced):
-  desk-core T3 follow-up, a `v2.0` GA release cut, a live smoke-test, or
-  starting `v2.5` UTA.
+**Active line: `v2.0` SPOT → production (GA roll-up).** Goal agreed with
+the owner: finish spot, cover it, smoke-test it, and add the missing
+rate-limiter so the spot connector can go live. v2.5 (UTA/V3 alongside
+V2 + remaining sections) starts only after spot is in production.
+
+Done in this line (SDK + desk-core, on `main` / `bitget-connector`):
+
+- **SDK examples** — added runnable spot demos mirroring the mix set:
+  `examples/spot-marketdata`, `examples/spot-place-order`,
+  `examples/spot-private-stream`, plus `examples/spot-smoke` — a
+  one-shot production-readiness harness (public REST/WS, signed REST,
+  private-WS login, post-only trading round-trip; PASS/FAIL/SKIP
+  summary; `-read-only` and public-only modes). Signed examples read
+  `BITGET_SPOT_*` with fallback to the generic `BITGET_*` triple.
+- **SPOT rate-limiter (desk-core)** — added
+  `internal/rate-limiter/bitget-spot-strategy.go` (+ `_test.go`),
+  wired `case *bitget_spot.BitgetSpotConnector` into
+  `internal/rate-limiter/factory.go`. The shared `bitget-base.go` was
+  made profile-aware via an **injectable endpoint resolver**
+  (`endpointResolver` + `cancelAllEndpoint` on `bitgetLimiterCore`):
+  nil → legacy MIX free-function (mix stays bit-identical, zero risk);
+  spot injects `/api/v2/spot/trade/*` paths so live `X-RateLimit-*`
+  header state and cancel-all detection work on the spot wire. This
+  closed the gap where `spot.connector.GetRateLimitChannel()` had no
+  consumer strategy.
+- **Audits (no code change)** — error-code coverage (`internal/bgerr`)
+  and SPOT↔MIX API parity both confirmed complete.
+
+Remaining for GA: maintainer cuts the `v2.0.0` tag (agent does NOT tag);
+run `examples/spot-smoke` against the live account with real
+`BITGET_SPOT_*` keys (agent cannot run live trades).
 
 ### 📋 Planned
 
