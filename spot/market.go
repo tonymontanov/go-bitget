@@ -274,6 +274,55 @@ func (m *MarketDataClient) GetOrderBook(ctx context.Context, symbol string, dept
 // 1000; M2 only exposes the simpler "most recent N" form.
 const candlesMaxLength = 200
 
+// spotCandleGranularity maps the protocol-common roottypes.Timeframe to
+// the wire token the SPOT /api/v2/spot/market/candles endpoint expects.
+//
+// SPOT deviates from MIX here: the MIX candles endpoint accepts the
+// roottypes.Timeframe.Wire() tokens directly ("1m" / "1H" / "1D"), but
+// the SPOT endpoint rejects them with code=400171 and accepts a
+// different alphabet instead:
+//
+//	[1min,3min,5min,15min,30min,1h,4h,6h,12h,1day,1week,1M,
+//	 6Hutc,12Hutc,1Dutc,3Dutc,1Wutc,1Mutc]
+//
+// This is a profile-specific wire shape, so the mapping lives in the
+// spot package (the common enum stays semantic; MIX keeps using Wire()).
+// The WS candle channel ("candle1m" / "candle1H") is unaffected — it
+// uses the Wire() tokens on BOTH profiles, so only the REST mapping
+// differs.
+//
+// Unknown timeframes fall back to Wire() so a future enum value still
+// produces a request (which the exchange will reject loudly) rather than
+// an empty granularity.
+func spotCandleGranularity(tf roottypes.Timeframe) string {
+	switch tf {
+	case roottypes.Timeframe1m:
+		return "1min"
+	case roottypes.Timeframe5m:
+		return "5min"
+	case roottypes.Timeframe15m:
+		return "15min"
+	case roottypes.Timeframe30m:
+		return "30min"
+	case roottypes.Timeframe1h:
+		return "1h"
+	case roottypes.Timeframe4h:
+		return "4h"
+	case roottypes.Timeframe6h:
+		return "6h"
+	case roottypes.Timeframe12h:
+		return "12h"
+	case roottypes.Timeframe1d:
+		return "1day"
+	case roottypes.Timeframe1w:
+		return "1week"
+	case roottypes.Timeframe1M:
+		return "1M"
+	default:
+		return tf.Wire()
+	}
+}
+
 // GetHistoricalCandles returns up to `length` recent candles for
 // `symbol` at the given timeframe. Bitget caps a single call at 200
 // rows in this mode (no startTime/endTime). length ≤ 0 → 100 (a
@@ -299,7 +348,7 @@ func (m *MarketDataClient) GetHistoricalCandles(
 
 	var query url.Values = url.Values{}
 	query.Set("symbol", symbol)
-	query.Set("granularity", timeframe.Wire())
+	query.Set("granularity", spotCandleGranularity(timeframe))
 	query.Set("limit", strconv.Itoa(length))
 
 	var resp rest.Response

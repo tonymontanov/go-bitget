@@ -435,8 +435,11 @@ func TestContract_Spot_GetHistoricalCandles_PreservesAscendingOrder(t *testing.T
 		"/api/v2/spot/market/candles": fixture,
 	}, func(t *testing.T, r *http.Request) {
 		var q url.Values = r.URL.Query()
-		if got := q.Get("granularity"); got != "1m" {
-			t.Errorf("granularity: want 1m, got %q", got)
+		// SPOT granularity alphabet differs from MIX: the endpoint
+		// rejects the Wire() token "1m" with code=400171 and expects
+		// "1min". Regression guard for the production PARTIUSDT bug.
+		if got := q.Get("granularity"); got != "1min" {
+			t.Errorf("granularity: want 1min, got %q", got)
 		}
 		if got := q.Get("limit"); got != "3" {
 			t.Errorf("limit: want 3, got %q", got)
@@ -490,5 +493,39 @@ func TestContract_Spot_GetHistoricalCandles1m_DefaultLength(t *testing.T) {
 	// length=0 → default 100.
 	if seen != "100" {
 		t.Errorf("limit: want 100, got %q", seen)
+	}
+}
+
+// TestSpotCandleGranularity_FullTable pins the SPOT REST granularity
+// alphabet for every roottypes.Timeframe. SPOT diverges from MIX (which
+// uses the Wire() tokens verbatim): the spot /candles endpoint rejects
+// "1m" / "1H" / "1D" with code=400171 and expects "1min" / "1h" /
+// "1day". This guards the production PARTIUSDT regression where the spot
+// candles loader sent the MIX alphabet.
+func TestSpotCandleGranularity_FullTable(t *testing.T) {
+	t.Parallel()
+	var cases = []struct {
+		tf   roottypes.Timeframe
+		want string
+	}{
+		{roottypes.Timeframe1m, "1min"},
+		{roottypes.Timeframe5m, "5min"},
+		{roottypes.Timeframe15m, "15min"},
+		{roottypes.Timeframe30m, "30min"},
+		{roottypes.Timeframe1h, "1h"},
+		{roottypes.Timeframe4h, "4h"},
+		{roottypes.Timeframe6h, "6h"},
+		{roottypes.Timeframe12h, "12h"},
+		{roottypes.Timeframe1d, "1day"},
+		{roottypes.Timeframe1w, "1week"},
+		{roottypes.Timeframe1M, "1M"},
+	}
+	var i int
+	for i = 0; i < len(cases); i++ {
+		var got string = spotCandleGranularity(cases[i].tf)
+		if got != cases[i].want {
+			t.Errorf("spotCandleGranularity(%q) = %q, want %q",
+				cases[i].tf, got, cases[i].want)
+		}
 	}
 }
