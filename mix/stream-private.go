@@ -2,12 +2,13 @@
 FILE: mix/stream-private.go
 
 DESCRIPTION:
-Private WebSocket sub-client for Bitget MIX. Wires the three account-side
-channels the desk consumes off the private feed:
+Private WebSocket sub-client for Bitget MIX. Wires the four account-
+side channels the desk consumes off the private feed:
 
 	WatchOrders     → "orders"     (full order lifecycle: place/fill/cancel)
 	WatchPositions  → "positions"  (position size / margin / pnl)
 	WatchAccount    → "account"    (per-margin-coin wallet snapshot)
+	WatchFills      → "fill"       (per-execution feed; v2.0.0-m6)
 
 DESIGN:
 
@@ -80,6 +81,7 @@ const (
 	channelOrders    = "orders"
 	channelPositions = "positions"
 	channelAccount   = "account"
+	channelFill      = "fill"
 )
 
 // instIDDefaultPrivate is the only accepted instId value on Bitget
@@ -355,6 +357,74 @@ func (s *StreamClient) WatchAccount(
 }
 
 // ---------------------------------------------------------------------
+// WatchFills.
+// ---------------------------------------------------------------------
+
+// WatchFills subscribes to the mix `fill` private channel and surfaces
+// per-execution rows. Each push delivers one or more fills (Bitget
+// batches concurrent fills on the same order) and the SDK fans them
+// out to the handler so the caller sees one FillUpdate per execution.
+//
+// Wire-level the SDK always subscribes with instId="default" — same
+// rule as orders / positions on mix; per-symbol subscribe is
+// rejected with code=30001. The per-symbol semantics callers expect
+// are preserved client-side via the InstID filter inside
+// handleFillsFrame. Pass `symbol="default"` (or empty string is
+// rejected by validation) to receive every fill on the account.
+//
+// MIX-SPECIFIC FIELDS (vs spot.WatchFills):
+//
+//   - clientOid IS shipped on the mix fill channel and surfaces as
+//     FillUpdate.ClientOrderID — useful for joining fills to the
+//     desk's idempotency-key cache without going through orders.
+//   - posMode / tradeSide / profit are mix-only.
+//   - Wire field names: `price` / `baseVolume` / `quoteVolume`
+//     (spot uses `priceAvg` / `size` / `amount` for the same
+//     concepts).
+func (s *StreamClient) WatchFills(
+	ctx context.Context,
+	symbol string,
+	handler func(mixtypes.FillUpdate),
+	errHandler func(error),
+) error {
+	if symbol == "" {
+		return errInvalidRequest("WatchFills", "symbol is empty")
+	}
+	if handler == nil {
+		return errInvalidRequest("WatchFills", "handler is nil")
+	}
+
+	var conn *ws.Conn
+	var err error
+	conn, err = s.ensurePrivateConn()
+	if err != nil {
+		return err
+	}
+
+	var filter string = symbol
+	if filter == instIDDefaultPrivate {
+		filter = ""
+	}
+
+	var arg ws.SubscriptionArg = ws.SubscriptionArg{
+		InstType: string(s.c.productType),
+		Channel:  channelFill,
+		InstID:   instIDDefaultPrivate,
+	}
+	var sub *ws.Subscription = &ws.Subscription{
+		Arg: arg,
+		Handler: func(_ ws.SubscriptionArg, _ string, payload []byte, _ int64, _ int64) {
+			s.handleFillsFrame(payload, filter, handler, errHandler)
+		},
+	}
+	if err = conn.Subscribe(sub); err != nil {
+		return err
+	}
+	s.detachPrivateOnContextDone(ctx, arg)
+	return nil
+}
+
+// ---------------------------------------------------------------------
 // Frame handlers.
 // ---------------------------------------------------------------------
 
@@ -455,6 +525,39 @@ func (s *StreamClient) handleAccountFrame(
 	}
 }
 
+// handleFillsFrame parses one "fill" channel frame and fans the per-
+// execution rows out to the user handler. Same symbolFilter
+// semantics as handleOrdersFrame.
+func (s *StreamClient) handleFillsFrame(
+	payload []byte,
+	symbolFilter string,
+	handler func(mixtypes.FillUpdate),
+	errHandler func(error),
+) {
+	if len(payload) == 0 {
+		return
+	}
+	var rows []wsFillRow
+	if err := codec.Unmarshal(payload, &rows); err != nil {
+		s.surfaceError(errHandler, "WatchFills", "decode fill frame", err)
+		return
+	}
+	var i int
+	for i = 0; i < len(rows); i++ {
+		if symbolFilter != "" && rows[i].Symbol != symbolFilter {
+			continue
+		}
+		var info mixtypes.FillUpdate
+		var err error
+		info, err = convertWSFillRow(rows[i])
+		if err != nil {
+			s.surfaceError(errHandler, "WatchFills", "parse fill row", err)
+			continue
+		}
+		handler(info)
+	}
+}
+
 // ---------------------------------------------------------------------
 // Wire row structs.
 // ---------------------------------------------------------------------
@@ -540,6 +643,35 @@ type wsAccountRow struct {
 	IsolatedShortLever bgcommon.FlexString `json:"isolatedShortLever"`
 	Locked             bgcommon.FlexString `json:"locked"`
 	Coupon             bgcommon.FlexString `json:"coupon"`
+}
+
+// wsFillRow mirrors one element of the mix "fill" data array.
+// Differences vs. spot.wsFillRow:
+//
+//   - DOES carry clientOid (spot's fill channel does not);
+//   - carries posMode / tradeSide / profit (derivatives-only);
+//   - wire field names: price / baseVolume / quoteVolume (vs spot's
+//     priceAvg / size / amount for the same concepts).
+//
+// FeeDetail uses the shared bgcommon row + parser — its wire shape
+// is byte-identical between mix and spot.
+type wsFillRow struct {
+	OrderID     string                    `json:"orderId"`
+	ClientOid   string                    `json:"clientOid"`
+	TradeID     string                    `json:"tradeId"`
+	Symbol      string                    `json:"symbol"`
+	Side        string                    `json:"side"`
+	OrderType   string                    `json:"orderType"`
+	PosMode     string                    `json:"posMode"`
+	TradeSide   string                    `json:"tradeSide"`
+	Price       bgcommon.FlexString       `json:"price"`
+	BaseVolume  bgcommon.FlexString       `json:"baseVolume"`
+	QuoteVolume bgcommon.FlexString       `json:"quoteVolume"`
+	Profit      bgcommon.FlexString       `json:"profit"`
+	TradeScope  string                    `json:"tradeScope"`
+	FeeDetail   []bgcommon.WSFeeDetailRow `json:"feeDetail"`
+	CTime       bgcommon.FlexString       `json:"cTime"`
+	UTime       bgcommon.FlexString       `json:"uTime"`
 }
 
 // ---------------------------------------------------------------------
@@ -714,6 +846,51 @@ func convertWSAccountRow(row wsAccountRow) (roottypes.Balance, error) {
 	return out, nil
 }
 
+func convertWSFillRow(row wsFillRow) (mixtypes.FillUpdate, error) {
+	var out mixtypes.FillUpdate = mixtypes.FillUpdate{
+		OrderID:       row.OrderID,
+		ClientOrderID: row.ClientOid,
+		TradeID:       row.TradeID,
+		Symbol:        row.Symbol,
+		Side:          roottypes.SideType(row.Side),
+		OrderType:     roottypes.OrderType(row.OrderType),
+		PosMode:       row.PosMode,
+		TradeSide:     roottypes.TradeSide(row.TradeSide),
+		TradeScope:    row.TradeScope,
+	}
+
+	var err error
+	out.Price, err = bgcommon.ParseDecimalOrZero(string(row.Price))
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("price", err)
+	}
+	out.BaseVolume, err = bgcommon.ParseDecimalOrZero(string(row.BaseVolume))
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("baseVolume", err)
+	}
+	out.QuoteVolume, err = bgcommon.ParseDecimalOrZero(string(row.QuoteVolume))
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("quoteVolume", err)
+	}
+	out.Profit, err = bgcommon.ParseDecimalOrZero(string(row.Profit))
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("profit", err)
+	}
+	out.FeeDetail, err = bgcommon.ParseFeeDetailList(row.FeeDetail)
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("feeDetail", err)
+	}
+	out.CreatedAtMs, err = bgcommon.ParseInt64OrZero(string(row.CTime))
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("cTime", err)
+	}
+	out.UpdatedAtMs, err = bgcommon.ParseInt64OrZero(string(row.UTime))
+	if err != nil {
+		return mixtypes.FillUpdate{}, wrapWSFillParseErr("uTime", err)
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------
 // Error helpers.
 // ---------------------------------------------------------------------
@@ -731,4 +908,9 @@ func wrapWSPositionParseErr(field string, cause error) error {
 func wrapWSAccountParseErr(field string, cause error) error {
 	return bitget.NewError(bitget.ErrorKindUnknown, "",
 		"mix.Stream.WatchAccount: parse "+field, cause)
+}
+
+func wrapWSFillParseErr(field string, cause error) error {
+	return bitget.NewError(bitget.ErrorKindUnknown, "",
+		"mix.Stream.WatchFills: parse "+field, cause)
 }

@@ -4,6 +4,135 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0-m6 — 2026-06-03
+
+Sixth and final milestone of the **v2.0 SPOT** profile. Closes the
+mix↔spot symmetry on the private WebSocket surface: spot picks up
+the two private channels deferred from M5 (`account`, `fill`) and
+mix gains the channel that was missing since v1.0 (`fill`). After
+M6 the private surfaces are fully symmetric except `WatchPositions`,
+which is mix-only by venue contract (cash-only spot has no positions).
+
+### Added
+
+- **`spot.StreamClient.WatchAccount(ctx, coin, handler, errHandler)`** —
+  subscribes to the spot `account` private channel.
+  - Wire-level the SDK ALWAYS subscribes with `coin="default"` —
+    the only value Bitget V2's spot account channel accepts ("Only
+    default is supported now" per the official docs). Per-coin
+    semantics are preserved client-side: pass any concrete coin
+    (e.g. `"USDT"`) to receive only its rows; pass empty string or
+    `"default"` to receive every asset on the account.
+  - The handler receives `spottypes.AccountUpdate` — a profile-local
+    per-asset shape (`Coin` / `Available` / `Frozen` / `Locked` /
+    `LimitAvailable` / `UpdatedAtMs`). Distinct from `mix.WatchAccount`'s
+    per-margin-coin `roottypes.Balance`: spot has no positions or
+    unrealized PnL, so a shared shape would always-zero half of mix's
+    fields or force spot users to ignore meaningless columns. Same
+    anti-pattern we avoided for ticker in M4.
+
+- **`spot.StreamClient.WatchFills(ctx, symbol, handler, errHandler)`** —
+  subscribes to the spot `fill` private channel.
+  - Subscribes with `instId="default"` (per-symbol rejected with
+    code=30001, same as orders); per-symbol semantics preserved
+    client-side via the dispatcher filter.
+  - Handler receives `spottypes.FillUpdate` (`OrderID` / `TradeID` /
+    `Symbol` / `Side` / `OrderType` / `PriceAvg` / `Size` / `Amount` /
+    `TradeScope` / `FeeDetail[]` / `CreatedAtMs` / `UpdatedAtMs`).
+  - **`clientOid` is NOT shipped on spot fills** (verified against
+    Bitget V2 docs). Callers that need to correlate fills with the
+    desk's idempotency keys MUST go through the `orders` push (which
+    DOES carry clientOid) and join on OrderID. This is a venue-level
+    invariant — the SDK does not invent a stateful cross-channel join.
+
+- **`mix.StreamClient.WatchFills(ctx, symbol, handler, errHandler)`** —
+  subscribes to the mix `fill` private channel.
+  - `instId="default"` + client-side symbol filter, identical
+    contract to existing mix orders / positions.
+  - Handler receives `mixtypes.FillUpdate` — distinct from spot's
+    counterpart: mix DOES carry `clientOid` (useful for joining
+    fills to the desk's idempotency cache without going through
+    orders), plus derivatives-only fields (`PosMode` / `TradeSide` /
+    `Profit`). Wire field names are different too (`price` /
+    `baseVolume` / `quoteVolume` vs spot's `priceAvg` / `size` /
+    `amount`).
+
+- **Profile-local `FillUpdate` types**:
+  - `spot/types/fill-update.go` → `spottypes.FillUpdate`
+  - `mix/types/fill-update.go` → `mixtypes.FillUpdate`
+  - Distinct from the existing REST `Fill` shape on spot
+    (`spot/types/fill.go`): the WS push ships a `feeDetail[]` ARRAY
+    so a single execution can carry both a primary fee and a BGB-
+    deduction credit. REST collapses that into singletons.
+
+- **Profile-local `spottypes.AccountUpdate`** (`spot/types/account-
+  update.go`) — per-asset balance shape distinct from mix's per-
+  margin-coin `roottypes.Balance`.
+
+### Internal
+
+- **`internal/bgcommon/wsfee.go`** — single source of truth for the
+  `feeDetail[]` array on the V2 fill channel. Wire row
+  (`WSFeeDetailRow`) uses `bgcommon.FlexString` on every numeric
+  field; typed shape (`WSFeeDetail`) maps to `decimal.Decimal`.
+  `ParseFeeDetail` / `ParseFeeDetailList` consumed by both
+  `spot.convertWSFillRow` and `mix.convertWSFillRow` — the only
+  piece of the fill push that has byte-identical wire across both
+  profiles, so it lives in shared infrastructure rather than
+  parallel-copy-pasting.
+
+- **mix audit pass — back-port of M5 discipline**: `mix/stream-
+  private.go` already implemented the M5 contract (errInvalidRequest
+  on validation, FlexString on every numeric, detachPrivateOnContext
+  Done, surfaceError on parse errors, instId="default"+filter). The
+  audit therefore focused on test-coverage parity with the spot M5
+  suite, adding three regression guards that mix lacked:
+  - `TestContract_WatchOrders_FilterDropsForeignSymbol` — the per-
+    symbol filter for orders (mix had it for positions only).
+  - `TestContract_WatchOrders_DefaultSymbolReceivesAll` — opt-out
+    via `symbol="default"` for orders.
+  - `TestContract_WatchOrders_AcceptsNumericFields` — flexString
+    regression guard on orders (mix had `WatchPositions_AcceptsNumeric
+    Leverage` only).
+
+### Contract tests
+
+- **`spot/stream_private_contract_test.go`** — six new tests:
+  - `TestContract_Spot_WatchAccount_FieldMapping` — happy-path per-
+    asset row mapping; subscribe arg pinned to `coin="default"`.
+  - `TestContract_Spot_WatchAccount_FilterDropsForeignCoin` — the
+    client-side per-coin filter on a multi-asset push.
+  - `TestContract_Spot_WatchFills_FieldMapping` — happy-path with
+    a one-element feeDetail (typical: single fee, no BGB deduction).
+  - `TestContract_Spot_WatchFills_FilterDropsForeignSymbol` — same
+    per-symbol contract as orders.
+  - `TestContract_Spot_WatchFills_AcceptsNumericFields` — pre-emptive
+    flexString regression guard on fills.
+  - Extended `TestContract_Spot_PrivateChannels_RequireSigner` and
+    `TestContract_Spot_StreamPrivateValidation` to table-driven over
+    every M5+M6 channel.
+
+- **`mix/stream_private_contract_test.go`** — three new fills tests
+  (FieldMapping / FilterDropsForeignSymbol / AcceptsNumericFields)
+  plus extended Auth / Validation tables to cover `WatchFills`.
+
+- **`internal/bgcommon/wsfee_test.go`** — unit tests for
+  `ParseFeeDetail` / `ParseFeeDetailList`: happy path, JSON-number-
+  vs-string acceptance, empty-input contract, error propagation.
+
+### Roadmap
+
+  - **v2.0.0-m6** (this tag): mix↔spot private-WS symmetry. Closes
+                  the deferred items from M5 (`spot.WatchAccount`,
+                  `spot.WatchFills`) plus the mix gap
+                  (`mix.WatchFills`). Audit pass on
+                  `mix/stream-private.go` extended the contract-test
+                  coverage to M5 levels.
+  - **v2.0.0**:    aggregate release — the v2.0 spot profile is now
+                  feature-complete on REST + public WS + private WS.
+  - **v2.5**:      `uta/` profile (V3 unified trading account, hedge
+                  mode, demo / testnet hosts).
+
 ## v2.0.0-m5 — 2026-06-03
 
 Fifth milestone of the **v2.0 SPOT** profile. Wires the private

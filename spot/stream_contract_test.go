@@ -200,6 +200,16 @@ func (m *streamMockServer) handle(w http.ResponseWriter, r *http.Request) {
 // matching arg key.
 func (m *streamMockServer) pushFrame(t *testing.T, action, channel, instID string, data any, tsMs int64) {
 	t.Helper()
+	m.pushFrameWithCoin(t, action, channel, instID, "", data, tsMs)
+}
+
+// pushFrameWithCoin is the variant used by the spot `account` channel:
+// it is keyed by `coin`, not `instId`, so the envelope arg must carry
+// the coin field for ws.Conn's registry dispatch (env.Arg.Key()) to
+// match the subscription. Symmetric with the helper in mix's
+// stream_contract_test.go.
+func (m *streamMockServer) pushFrameWithCoin(t *testing.T, action, channel, instID, coin string, data any, tsMs int64) {
+	t.Helper()
 	var conn *websocket.Conn = m.activeConn()
 	if conn == nil {
 		t.Fatalf("no active connection")
@@ -207,7 +217,12 @@ func (m *streamMockServer) pushFrame(t *testing.T, action, channel, instID strin
 	var arg = map[string]string{
 		"instType": "SPOT",
 		"channel":  channel,
-		"instId":   instID,
+	}
+	if instID != "" {
+		arg["instId"] = instID
+	}
+	if coin != "" {
+		arg["coin"] = coin
 	}
 	var frame = map[string]any{
 		"action": action,

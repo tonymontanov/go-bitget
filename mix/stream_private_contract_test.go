@@ -148,6 +148,197 @@ func TestContract_WatchOrders_FieldMapping(t *testing.T) {
 	}
 }
 
+// TestContract_WatchOrders_FilterDropsForeignSymbol locks down the
+// per-symbol filter for orders. SDK subscribes globally with
+// instId="default", but the user handler must only see rows whose
+// row.InstID matches the requested symbol. Symmetric with the
+// existing positions test (which catches the same regression class
+// — once the SDK ships per-symbol filtering, EVERY private channel
+// that overrides instId="default" must filter).
+func TestContract_WatchOrders_FilterDropsForeignSymbol(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.OrderInfo
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchOrders(ctx, "BTCUSDT",
+		func(o mixtypes.OrderInfo) {
+			gotMu.Lock()
+			got = append(got, o)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchOrders: %v", err)
+	}
+	<-mock.subs
+
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "orders", "default",
+		[]map[string]any{
+			{
+				"instId": "ETHUSDT", "orderId": "ord-eth", "clientOid": "cli-eth",
+				"side": "buy", "tradeSide": "open", "posSide": "long",
+				"orderType": "limit", "force": "gtc", "status": "live",
+				"size": "1", "price": "2500", "marginCoin": "USDT",
+				"marginMode": "crossed", "leverage": "5",
+			},
+			{
+				"instId": "BTCUSDT", "orderId": "ord-btc", "clientOid": "cli-btc",
+				"side": "buy", "tradeSide": "open", "posSide": "long",
+				"orderType": "limit", "force": "gtc", "status": "live",
+				"size": "0.01", "price": "50000", "marginCoin": "USDT",
+				"marginMode": "crossed", "leverage": "10",
+			},
+		}, 1700000000050)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) >= 1
+	})
+	gotMu.Lock()
+	defer gotMu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 row (BTCUSDT only), got %d: %#v", len(got), got)
+	}
+	if got[0].Symbol != "BTCUSDT" {
+		t.Fatalf("expected BTCUSDT, got %q (filter regression)", got[0].Symbol)
+	}
+}
+
+// TestContract_WatchOrders_DefaultSymbolReceivesAll covers the
+// caller-friendly opt-out for orders: pass "default" → no filter,
+// every order on the account reaches the handler.
+func TestContract_WatchOrders_DefaultSymbolReceivesAll(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.OrderInfo
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchOrders(ctx, "default",
+		func(o mixtypes.OrderInfo) {
+			gotMu.Lock()
+			got = append(got, o)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchOrders: %v", err)
+	}
+	<-mock.subs
+
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "orders", "default",
+		[]map[string]any{
+			{"instId": "ETHUSDT", "orderId": "o1", "clientOid": "c1", "side": "buy", "orderType": "limit", "force": "gtc", "status": "live", "size": "1", "price": "2500", "marginCoin": "USDT", "marginMode": "crossed"},
+			{"instId": "BTCUSDT", "orderId": "o2", "clientOid": "c2", "side": "buy", "orderType": "limit", "force": "gtc", "status": "live", "size": "0.01", "price": "50000", "marginCoin": "USDT", "marginMode": "crossed"},
+		}, 1700000000050)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) == 2
+	})
+}
+
+// TestContract_WatchOrders_AcceptsNumericFields locks down the
+// flexString regression observed on prod for positions (PARTIUSDT,
+// May 27 2026, v1.2.1) but applied to the orders channel: the wire
+// MAY ship every numeric field as a JSON number instead of the
+// documented quoted string. flexString accepts both shapes; this
+// test pins it for orders so a future strict-typed regression on
+// this channel is caught at CI time.
+func TestContract_WatchOrders_AcceptsNumericFields(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got = make(chan mixtypes.OrderInfo, 4)
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchOrders(ctx, "BTCUSDT",
+		func(o mixtypes.OrderInfo) {
+			select {
+			case got <- o:
+			default:
+			}
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchOrders: %v", err)
+	}
+	<-mock.subs
+
+	// Every numeric field below is shipped as a JSON number — the
+	// failure mode that abort-decoded the entire push pre-v1.2.1.
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "orders", "default",
+		[]map[string]any{{
+			"instId":        "BTCUSDT",
+			"orderId":       "ord-num",
+			"clientOid":     "cli-num",
+			"side":          "buy",
+			"tradeSide":     "open",
+			"posSide":       "long",
+			"orderType":     "limit",
+			"force":         "gtc",
+			"status":        "partially_filled",
+			"size":          0.01,
+			"price":         50000,
+			"accBaseVolume": 0.003,
+			"priceAvg":      50001,
+			"fee":           0.0001,
+			"marginCoin":    "USDT",
+			"marginMode":    "crossed",
+			"leverage":      10,
+			"cTime":         1700000000000,
+			"uTime":         1700000000050,
+		}}, 1700000000050)
+
+	select {
+	case o := <-got:
+		if o.OrderID != "ord-num" {
+			t.Fatalf("orderId: %q (decode regression)", o.OrderID)
+		}
+		if o.Quantity.String() != "0.01" || o.Price.String() != "50000" {
+			t.Fatalf("qty/price: %s/%s (numeric-field regression)", o.Quantity, o.Price)
+		}
+		if o.FilledQuantity.String() != "0.003" || o.AvgFilledPrice.String() != "50001" {
+			t.Fatalf("filled/avg: %s/%s", o.FilledQuantity, o.AvgFilledPrice)
+		}
+		if o.UpdatedAtMs != 1700000000050 {
+			t.Fatalf("uTime: %d", o.UpdatedAtMs)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("orders handler not invoked (numeric-field regression)")
+	}
+}
+
 // ---------------------------------------------------------------------
 // WatchPositions.
 // ---------------------------------------------------------------------
@@ -534,6 +725,230 @@ func TestContract_WatchAccount_FieldMapping(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// WatchFills (v2.0.0-m6).
+// ---------------------------------------------------------------------
+
+// TestContract_WatchFills_FieldMapping pins the per-execution wire →
+// SDK conversion for the mix `fill` channel including derivatives-
+// only fields (clientOid / posMode / tradeSide / profit) and the
+// mix-vs-spot field-name divergence (price vs priceAvg, baseVolume
+// vs size, quoteVolume vs amount). Subscribe arg pins instId="default".
+func TestContract_WatchFills_FieldMapping(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got = make(chan mixtypes.FillUpdate, 4)
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchFills(ctx, "BTCUSDT",
+		func(f mixtypes.FillUpdate) {
+			select {
+			case got <- f:
+			default:
+			}
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchFills: %v", err)
+	}
+
+	select {
+	case sub := <-mock.subs:
+		if sub["channel"] != "fill" || sub["instId"] != "default" {
+			t.Fatalf("unexpected subscribe arg (expected instId=default): %#v", sub)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("subscribe not received")
+	}
+
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "fill", "default",
+		[]map[string]any{{
+			"orderId":     "ord-1",
+			"clientOid":   "cli-1",
+			"tradeId":     "trd-1",
+			"symbol":      "BTCUSDT",
+			"side":        "buy",
+			"orderType":   "market",
+			"posMode":     "one_way_mode",
+			"tradeSide":   "open",
+			"price":       "51000.5",
+			"baseVolume":  "0.01",
+			"quoteVolume": "510.005",
+			"profit":      "0",
+			"tradeScope":  "taker",
+			"feeDetail": []map[string]any{{
+				"feeCoin":           "USDT",
+				"deduction":         "no",
+				"totalDeductionFee": "0",
+				"totalFee":          "-0.183717",
+			}},
+			"cTime": "1703577336606",
+			"uTime": "1703577336606",
+		}}, 1703577336700)
+
+	select {
+	case f := <-got:
+		if f.OrderID != "ord-1" || f.ClientOrderID != "cli-1" || f.TradeID != "trd-1" {
+			t.Fatalf("ids: %#v", f)
+		}
+		if f.Symbol != "BTCUSDT" {
+			t.Fatalf("symbol: %s", f.Symbol)
+		}
+		if f.PosMode != "one_way_mode" {
+			t.Fatalf("posMode: %s", f.PosMode)
+		}
+		if string(f.TradeSide) != "open" {
+			t.Fatalf("tradeSide: %s", f.TradeSide)
+		}
+		if f.Price.String() != "51000.5" {
+			t.Fatalf("price: %s", f.Price)
+		}
+		if f.BaseVolume.String() != "0.01" || f.QuoteVolume.String() != "510.005" {
+			t.Fatalf("base/quote: %s/%s", f.BaseVolume, f.QuoteVolume)
+		}
+		if !f.Profit.IsZero() {
+			t.Fatalf("profit: %s (expected 0)", f.Profit)
+		}
+		if len(f.FeeDetail) != 1 || f.FeeDetail[0].TotalFee.String() != "-0.183717" {
+			t.Fatalf("feeDetail: %#v", f.FeeDetail)
+		}
+		if f.CreatedAtMs != 1703577336606 {
+			t.Fatalf("cTime: %d", f.CreatedAtMs)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("fill handler not invoked")
+	}
+}
+
+// TestContract_WatchFills_FilterDropsForeignSymbol — same per-symbol
+// semantics as orders / positions: subscribe with concrete symbol →
+// rows for other symbols never reach the handler.
+func TestContract_WatchFills_FilterDropsForeignSymbol(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.FillUpdate
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchFills(ctx, "BTCUSDT",
+		func(f mixtypes.FillUpdate) {
+			gotMu.Lock()
+			got = append(got, f)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchFills: %v", err)
+	}
+	<-mock.subs
+
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "fill", "default",
+		[]map[string]any{
+			{"orderId": "o1", "clientOid": "c1", "tradeId": "t1", "symbol": "ETHUSDT", "side": "buy", "orderType": "limit", "posMode": "one_way_mode", "tradeSide": "open", "price": "2500", "baseVolume": "0.1", "quoteVolume": "250"},
+			{"orderId": "o2", "clientOid": "c2", "tradeId": "t2", "symbol": "BTCUSDT", "side": "sell", "orderType": "limit", "posMode": "one_way_mode", "tradeSide": "close", "price": "50000", "baseVolume": "0.001", "quoteVolume": "50"},
+		}, 1700000000050)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) >= 1
+	})
+	gotMu.Lock()
+	defer gotMu.Unlock()
+	if len(got) != 1 || got[0].Symbol != "BTCUSDT" {
+		t.Fatalf("expected exactly 1 BTCUSDT row, got %d: %#v (filter regression)", len(got), got)
+	}
+}
+
+// TestContract_WatchFills_AcceptsNumericFields — pre-emptive
+// flexString regression guard for the new mix fills channel.
+func TestContract_WatchFills_AcceptsNumericFields(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got = make(chan mixtypes.FillUpdate, 1)
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchFills(ctx, "BTCUSDT",
+		func(f mixtypes.FillUpdate) {
+			select {
+			case got <- f:
+			default:
+			}
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchFills: %v", err)
+	}
+	<-mock.subs
+
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "fill", "default",
+		[]map[string]any{{
+			"orderId":     "ord-num",
+			"clientOid":   "cli-num",
+			"tradeId":     "trd-num",
+			"symbol":      "BTCUSDT",
+			"side":        "buy",
+			"orderType":   "market",
+			"posMode":     "one_way_mode",
+			"tradeSide":   "open",
+			"price":       51000.5,
+			"baseVolume":  0.01,
+			"quoteVolume": 510.005,
+			"profit":      0,
+			"tradeScope":  "taker",
+			"feeDetail": []map[string]any{{
+				"feeCoin":           "USDT",
+				"deduction":         "no",
+				"totalDeductionFee": 0,
+				"totalFee":          -0.183717,
+			}},
+			"cTime": 1703577336606,
+			"uTime": 1703577336606,
+		}}, 1703577336700)
+
+	select {
+	case f := <-got:
+		if f.Price.String() != "51000.5" {
+			t.Fatalf("price from JSON-number: %s", f.Price)
+		}
+		if f.BaseVolume.String() != "0.01" || f.QuoteVolume.String() != "510.005" {
+			t.Fatalf("base/quote from JSON-number: %s/%s", f.BaseVolume, f.QuoteVolume)
+		}
+		if f.UpdatedAtMs != 1703577336606 {
+			t.Fatalf("uTime from JSON-number: %d", f.UpdatedAtMs)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("fill handler not invoked (numeric-field regression)")
+	}
+}
+
+// ---------------------------------------------------------------------
 // Auth guard.
 // ---------------------------------------------------------------------
 
@@ -560,6 +975,10 @@ func TestContract_PrivateChannels_RequireSigner(t *testing.T) {
 		{"account", func() error {
 			return c.Stream().WatchAccount(context.Background(),
 				func(roottypes.Balance) {}, nil)
+		}},
+		{"fills", func() error {
+			return c.Stream().WatchFills(context.Background(), "BTCUSDT",
+				func(mixtypes.FillUpdate) {}, nil)
 		}},
 	}
 	var i int
@@ -612,6 +1031,13 @@ func TestContract_StreamPrivateValidation(t *testing.T) {
 		}},
 		{"account nil handler", func() error {
 			return c.Stream().WatchAccount(context.Background(), nil, nil)
+		}},
+		{"fills empty symbol", func() error {
+			return c.Stream().WatchFills(context.Background(), "",
+				func(mixtypes.FillUpdate) {}, nil)
+		}},
+		{"fills nil handler", func() error {
+			return c.Stream().WatchFills(context.Background(), "BTCUSDT", nil, nil)
 		}},
 	}
 	var i int

@@ -6,8 +6,7 @@ HFT / algorithmic trading.
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
 Latest stable: **v1.2.2** — production-ready MIX (USDT-margined perps).
-Latest milestone: **v2.0.0-m5** — `spot/` private WebSocket: `WatchOrders` over a lazily-dialed signed `*ws.Conn` with `instId="default"` + client-side symbol filter (mirrors mix M5).
-Next: **v2.0.0-m6** — close mix↔spot private-WS gaps (`spot.WatchAccount`, `spot.WatchFills`, `mix.WatchFills`) + back-port M5 discipline to mix.
+Latest milestone: **v2.0.0-m6** — mix↔spot private-WS symmetry. Closes `spot.WatchAccount` (per-asset shape) + `spot.WatchFills` + `mix.WatchFills`. Shared `bgcommon.WSFeeDetail` parser unifies the only piece of the fill push that's byte-identical across profiles.
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
@@ -34,7 +33,7 @@ The new **UTA (V3)** family is deferred to v2.5.
 | **v2.0-m3** `spot/` Account + history REST | done | `AccountClient`: `GetAccountInfo` (`/account/info`) / `GetAccount` (`/account/assets`, all coins) / `GetOpenOrders` (`/trade/unfilled-orders`, paginated) / `GetOrderDetail` (POST `/trade/orderInfo`) / `GetOrderHistory` (`/trade/history-orders`, paginated, time-window) / `GetFills` (`/trade/fills`, paginated by tradeId, optional orderID filter). New `bgcommon.PaginateByCursor[T]` generic helper drives every paged call (mix `GetOpenOrders` rewired through it; ceiling message byte-stable). New types: `AccountInfo`, `Fill`. Contract tests pin pagination protocol on a stateful 250-row mock (3 pages: 100+100+50, cursor = last `orderId`). |
 | **v2.0-m4** `spot/` public WebSocket | done | `StreamClient`: `WatchOrderbook` (full-depth + CRC32 resync via shared `bgcommon/orderbook.Engine`) / `WatchTicker` (24h roll-ups: `open24h` / `high24h` / `low24h` / `change24h` / ...; no mark/index/funding) / `WatchTrades` (fan-out + buy/sell normalisation) / `WatchKline` (7-element row decoder via `bgcommon.ParseCandleRow`). Lazy `*ws.Conn` over `cfg.WS.PublicURL` (multiplexes spot + future uta on the same socket). New `bgcommon.OrderbookFrame` / `TradeFrame` / `ParseTradeFrame` / `ParseCandleRow` lifted from mix; ticker shape stays profile-local. Subscribe args pin `instType="SPOT"` (regression guard tested on every `Watch*`). |
 | **v2.0-m5** `spot/` private WebSocket | done | `StreamClient.WatchOrders` over lazy signed `*ws.Conn` (`cfg.WS.PrivateURL`); subscribe arg pins `instType=SPOT, channel=orders, instId=default` (Bitget V2 rejects per-symbol with `code=30001`); per-symbol semantics preserved client-side via the `instId` filter inside the dispatcher. Wire row reuses `bgcommon.FlexString` + `ParseDecimalOrZero` / `ParseInt64OrZero`; spot row omits mix-only fields (`tradeSide` / `posSide` / `marginCoin` / `marginMode` / `leverage` / `reduceOnly`). Auth pre-flight returns `ErrorKindAuth`; client-side validation returns `ErrorKindInvalidRequest`. `WatchPositions` intentionally omitted (cash-only spot has no positions); `WatchAccount` / `WatchFills` deferred to M6. |
-| **v2.0-m6** mix↔spot private-WS symmetry | pending | spot `WatchAccount` (profile-local per-asset `AccountUpdate`) + spot `WatchFills` + mix `WatchFills` (currently absent); audit pass on `mix/stream-private.go` to back-port M5 discipline (FlexString uniformity, ctx-cancel coverage, fail-fast input validation). After M6 the mix and spot private surfaces are fully symmetric (sans `WatchPositions`, which is mix-only by venue contract). |
+| **v2.0-m6** mix↔spot private-WS symmetry | done | `spot.StreamClient.WatchAccount` over `coin="default"` + client-side per-coin filter; profile-local `spottypes.AccountUpdate` (per-asset, distinct from mix's per-margin-coin `roottypes.Balance`). `spot.StreamClient.WatchFills` + `mix.StreamClient.WatchFills` over `instId="default"` + client-side symbol filter; profile-local `spottypes.FillUpdate` / `mixtypes.FillUpdate` (mix carries `clientOid` / `posMode` / `tradeSide` / `profit` that spot does not). New `bgcommon.WSFeeDetail` + `ParseFeeDetailList` consumed by both profiles — the one piece of the fill push that has byte-identical wire across mix and spot. Audit pass on `mix/stream-private.go` extended contract-test coverage to M5 parity (orders filter / default-symbol / numeric-fields regression guards added; mix already implemented the M5 discipline since v1.2.x PARTIUSDT fixes). After M6 the mix and spot private surfaces are fully symmetric except `WatchPositions`, which is mix-only by venue contract. |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
 ## Quick start
@@ -142,6 +141,14 @@ _ = mc.Stream().WatchAccount(streamCtx,
     func(b roottypes.Balance) { /* per-margin-coin wallet snapshot */ },
     nil,
 )
+
+// WatchFills lands in v2.0.0-m6 — per-execution feed with mix-only
+// fields (clientOid, posMode, tradeSide, profit) so callers can
+// correlate fills to idempotency keys without going through orders.
+_ = mc.Stream().WatchFills(streamCtx, "BTCUSDT",
+    func(f mixtypes.FillUpdate) { /* one FillUpdate per execution */ },
+    nil,
+)
 ```
 
 ### Spot profile (v2.0.0-m2)
@@ -197,6 +204,27 @@ results, _ := sc.Trading().ModifyBatchOrders(ctx, []spottypes.ModifyOrderRequest
 })
 
 _ = sc.Trading().CancelAllOrders(ctx, "BTCUSDT") // per-symbol on spot.
+
+// Private WebSocket streams — production-ready in v2.0.0-m6.
+//
+// Three channels mirror the surface of mix.WatchOrders / Account /
+// Fills (no WatchPositions on spot — cash-only). Wire-level the SDK
+// always subscribes with the venue-mandated wildcard
+// (instId="default" / coin="default") and applies per-symbol /
+// per-coin filtering client-side. Pass empty string or "default" to
+// opt out of the filter.
+_ = sc.Stream().WatchOrders(streamCtx, "BTCUSDT",
+    func(o spottypes.OrderInfo) { /* lifecycle: place / fill / cancel */ },
+    nil,
+)
+_ = sc.Stream().WatchAccount(streamCtx, "USDT",
+    func(a spottypes.AccountUpdate) { /* per-asset balance updates */ },
+    nil,
+)
+_ = sc.Stream().WatchFills(streamCtx, "BTCUSDT",
+    func(f spottypes.FillUpdate) { /* per-execution feed (no clientOid on spot) */ },
+    nil,
+)
 ```
 
 End-to-end runnable demos live under [`examples/`](./examples):
@@ -258,7 +286,8 @@ go-bitget/
                           #   trading.go        — REST trading (m2, done)
                           #   account.go        — REST account / history (m3, done)
                           #   stream.go         — public WS (m4, done)
-                          #   stream-private.go — private WS / WatchOrders (m5, done)
+                          #   stream-private.go — private WS: WatchOrders (m5),
+                          #                       WatchAccount + WatchFills (m6, done)
                           #   types/            — spot-only domain types
   uta/                    # v2.5 — Unified Trading Account (planned)
   examples/               # runnable end-to-end demos (v1.0)
