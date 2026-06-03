@@ -72,10 +72,12 @@ intentionally deferred (see "Not included" below).
   Bitget spot, but the wire shape diverges from mix (mix is per-
   margin-coin and bundles unrealized PnL / margin metrics; spot is
   per-asset and bundles only available/frozen). Wiring it cleanly
-  requires a spot-specific `Balance` shape; deferred to M6 if a
-  consumer surfaces a need.
-- **`WatchFills`** — optional real-time trade fills feed. Useful for
-  fee accounting; not required for order lifecycle. Deferred.
+  requires a profile-local spot `AccountUpdate` shape; deferred to
+  v2.0.0-m6.
+- **`WatchFills`** — real-time trade fills feed (per-execution).
+  Useful for fee accounting and trade-by-trade PnL attribution
+  on top of order lifecycle. Both spot and mix expose it; deferred
+  to v2.0.0-m6.
 
 ### Internal
 
@@ -85,6 +87,19 @@ intentionally deferred (see "Not included" below).
   decoupled.
 - **`StreamClient.Close()`** now closes both the public and the
   private connection (idempotent).
+
+### Roadmap
+
+  - **v2.0.0-m5** (this tag): spot private WS — `WatchOrders`.
+  - **v2.0.0-m6**: close the private-WS gaps —
+                   `spot.WatchAccount` (profile-local per-asset
+                   `AccountUpdate`), `spot.WatchFills`, plus
+                   `mix.WatchFills` for full mix↔spot symmetry on
+                   the private surface. Includes an audit pass on
+                   `mix/stream-private.go` to back-port the M5
+                   discipline (FlexString on every numeric, ctx-
+                   cancel coverage, fail-fast input validation).
+  - **v2.0.0**:    aggregate release once M6 lands.
 
 ## v2.0.0-m4 — 2026-05-28
 
