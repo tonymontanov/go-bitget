@@ -6,7 +6,7 @@ HFT / algorithmic trading.
 Module path: `github.com/tonymontanov/go-bitget/v2`
 
 Latest stable: **v1.2.2** — production-ready MIX (USDT-margined perps).
-Latest milestone: **v2.0.0-m4** — `spot/` public WebSocket (books / ticker / trade / candles); M5 fills in private WS.
+Latest milestone: **v2.0.0-m5** — `spot/` private WebSocket: `WatchOrders` over a lazily-dialed signed `*ws.Conn` with `instId="default"` + client-side symbol filter (mirrors mix M5).
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Status
@@ -32,7 +32,7 @@ The new **UTA (V3)** family is deferred to v2.5.
 | **v2.0-m2** `spot/` MarketData + Trading REST | done | `MarketDataClient`: `GetSymbolInfo` / `GetOrderBook` (numeric `limit`, 1..150) / `GetMarketTicker` (24h roll-ups) / `GetHistoricalCandles` (+1m). `TradingClient`: `CreateOrder` / `ModifyOrder` / `CancelOrder` + batch (place / **native** modify / cancel, ≤50 rows) + per-symbol `CancelAllOrders` (`/cancel-symbol-order`). Native `batch-cancel-replace-order` (single REST call vs. mix client-side fan-out). `s-<32-hex>` modify-clientOid prefix. `internal/bgcommon` lifted batch + clientOid helpers (`GenClientOid` / `ChooseClientOid` / `BatchEnvelope` / `ValidateBatchSize`); `mix/` rewired through them with byte-stable error messages. Contract tests on a local `httptest.Server` pin every wired endpoint plus the "no productType / marginMode / marginCoin / tradeSide on the spot wire" regression. |
 | **v2.0-m3** `spot/` Account + history REST | done | `AccountClient`: `GetAccountInfo` (`/account/info`) / `GetAccount` (`/account/assets`, all coins) / `GetOpenOrders` (`/trade/unfilled-orders`, paginated) / `GetOrderDetail` (POST `/trade/orderInfo`) / `GetOrderHistory` (`/trade/history-orders`, paginated, time-window) / `GetFills` (`/trade/fills`, paginated by tradeId, optional orderID filter). New `bgcommon.PaginateByCursor[T]` generic helper drives every paged call (mix `GetOpenOrders` rewired through it; ceiling message byte-stable). New types: `AccountInfo`, `Fill`. Contract tests pin pagination protocol on a stateful 250-row mock (3 pages: 100+100+50, cursor = last `orderId`). |
 | **v2.0-m4** `spot/` public WebSocket | done | `StreamClient`: `WatchOrderbook` (full-depth + CRC32 resync via shared `bgcommon/orderbook.Engine`) / `WatchTicker` (24h roll-ups: `open24h` / `high24h` / `low24h` / `change24h` / ...; no mark/index/funding) / `WatchTrades` (fan-out + buy/sell normalisation) / `WatchKline` (7-element row decoder via `bgcommon.ParseCandleRow`). Lazy `*ws.Conn` over `cfg.WS.PublicURL` (multiplexes spot + future uta on the same socket). New `bgcommon.OrderbookFrame` / `TradeFrame` / `ParseTradeFrame` / `ParseCandleRow` lifted from mix; ticker shape stays profile-local. Subscribe args pin `instType="SPOT"` (regression guard tested on every `Watch*`). |
-| **v2.0-m5** `spot/` private WebSocket | pending | account / orders / fills with login + auto-resub via `internal/ws.Conn`. |
+| **v2.0-m5** `spot/` private WebSocket | done | `StreamClient.WatchOrders` over lazy signed `*ws.Conn` (`cfg.WS.PrivateURL`); subscribe arg pins `instType=SPOT, channel=orders, instId=default` (Bitget V2 rejects per-symbol with `code=30001`); per-symbol semantics preserved client-side via the `instId` filter inside the dispatcher. Wire row reuses `bgcommon.FlexString` + `ParseDecimalOrZero` / `ParseInt64OrZero`; spot row omits mix-only fields (`tradeSide` / `posSide` / `marginCoin` / `marginMode` / `leverage` / `reduceOnly`). Auth pre-flight returns `ErrorKindAuth`; client-side validation returns `ErrorKindInvalidRequest`. `WatchPositions` intentionally omitted (cash-only spot has no positions); `WatchAccount` / `WatchFills` deferred to M6. |
 | **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
 
 ## Quick start
@@ -250,7 +250,14 @@ go-bitget/
                           #   stream-private.go — private WS (M5, done)
                           #   types/            — MIX-only domain types
                           #   contract_test.go  — JSON-fixture parser tests
-  spot/                   # v2.0 — Bitget spot category (planned)
+  spot/                   # v2.0 — Bitget spot category
+                          #   client.go         — *spot.Client + RegisterSpotFactory init
+                          #   market.go         — REST market-data (m2, done)
+                          #   trading.go        — REST trading (m2, done)
+                          #   account.go        — REST account / history (m3, done)
+                          #   stream.go         — public WS (m4, done)
+                          #   stream-private.go — private WS / WatchOrders (m5, done)
+                          #   types/            — spot-only domain types
   uta/                    # v2.5 — Unified Trading Account (planned)
   examples/               # runnable end-to-end demos (v1.0)
                           #   marketdata/      — public REST + WS book

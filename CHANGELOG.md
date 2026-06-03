@@ -4,6 +4,88 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.0-m5 — 2026-06-03
+
+Fifth milestone of the **v2.0 SPOT** profile. Wires the private
+WebSocket surface — specifically the `orders` channel that lifts
+`WatchOpenOrders` in `market-making-desk-core`. Other private
+channels available on Bitget spot (`account`, `fills`) are
+intentionally deferred (see "Not included" below).
+
+### Added
+
+- **`spot.StreamClient.WatchOrders(ctx, symbol, handler, errHandler)`** —
+  full order lifecycle feed (place / partial-fill / filled / cancel /
+  reject) over the private WS connection.
+  - Lazily-constructed signed `*ws.Conn` (`cfg.WS.PrivateURL`),
+    separate from the public conn spun up in M4. The supervisor
+    performs the V2 login op (`ACCESS-KEY` / `passphrase` /
+    `timestamp` / sign over `GET /user/verify` in base64-HMAC,
+    `internal/auth.SignWS`) before issuing any subscribe op.
+  - On the wire the SDK ALWAYS subscribes with
+    `instType="SPOT", channel="orders", instId="default"`. Bitget V2
+    rejects per-symbol `orders` subscriptions with `code=30001
+    "instId:<sym> doesn't exist"` (regression captured on mix in
+    v1.0.4 and now codified for spot too). The per-symbol semantics
+    callers expect are preserved client-side via the InstID filter
+    inside the dispatcher: pass any concrete symbol to receive only
+    its rows; pass `"default"` to opt out of the filter and receive
+    every order on the account.
+  - Wire row uses `bgcommon.FlexString` for every numeric field —
+    Bitget has been seen to ship the same field as a quoted string
+    on one push and a JSON number on the next. The PARTIUSDT
+    regression that broke mix in May 2026 is regression-tested for
+    spot too (`TestContract_Spot_WatchOrders_AcceptsNumericFields`).
+  - On reconnect `ws.Conn` re-logins and re-subscribes transparently;
+    `StreamClient` never observes a transport reset.
+
+- **Wire row struct `wsOrderRow` (spot)** — distinct from
+  `mix.wsOrderRow`: omits `tradeSide` / `posSide` / `marginCoin` /
+  `marginMode` / `leverage` / `reduceOnly` (cash-only spot, no
+  margin, no positions). Reuses `bgcommon.FlexString`,
+  `ParseDecimalOrZero`, `ParseInt64OrZero` — no copy-paste with mix
+  past the JSON-tag declarations.
+
+- **Contract tests** extending the M4 mock with a login handler:
+  - `TestContract_Spot_WatchOrders_FieldMapping` — happy-path
+    field-by-field on a single row.
+  - `TestContract_Spot_WatchOrders_FilterDropsForeignSymbol` — two
+    rows in one push (`ETHUSDT` + `BTCUSDT`), only the requested
+    symbol surfaces to the handler.
+  - `TestContract_Spot_WatchOrders_DefaultSymbolReceivesAll` —
+    `symbol="default"` opts out of the filter, both rows reach the
+    handler.
+  - `TestContract_Spot_WatchOrders_AcceptsNumericFields` — flex-
+    string regression guard: every numeric field shipped as a JSON
+    number instead of a quoted string still decodes cleanly.
+  - `TestContract_Spot_PrivateChannels_RequireSigner` — typed
+    `ErrorKindAuth` when API credentials are missing.
+  - `TestContract_Spot_StreamPrivateValidation` — empty symbol /
+    nil handler return `ErrorKindInvalidRequest` BEFORE any network
+    activity.
+
+### Not included (intentional, deferred)
+
+- **`WatchPositions`** — spot is cash-only, the channel does not
+  exist on Bitget spot. Mix exposes it; spot never will.
+- **`WatchAccount`** — per-asset balance pushes ARE shipped by
+  Bitget spot, but the wire shape diverges from mix (mix is per-
+  margin-coin and bundles unrealized PnL / margin metrics; spot is
+  per-asset and bundles only available/frozen). Wiring it cleanly
+  requires a spot-specific `Balance` shape; deferred to M6 if a
+  consumer surfaces a need.
+- **`WatchFills`** — optional real-time trade fills feed. Useful for
+  fee accounting; not required for order lifecycle. Deferred.
+
+### Internal
+
+- **`spot.StreamClient.privateState`** — embedded `privateConnState`
+  bundle (lazy `*ws.Conn` + own mutex + `closeOnce`), structurally
+  identical to the mix counterpart. Public-side fields stay
+  decoupled.
+- **`StreamClient.Close()`** now closes both the public and the
+  private connection (idempotent).
+
 ## v2.0.0-m4 — 2026-05-28
 
 Fourth milestone of the **v2.0 SPOT** profile. Wires the public

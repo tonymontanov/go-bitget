@@ -110,6 +110,12 @@ type StreamClient struct {
 	// resyncing is the per-arg flag preventing back-to-back resync
 	// goroutines from racing each other.
 	resyncing map[string]struct{}
+
+	// privateState bundles every field that needs locking around the
+	// private connection lifecycle (login + signed Subscribe). Used
+	// by stream-private.go (M5+). Kept under its own mutex so the
+	// public-side fields stay decoupled.
+	privateState privateConnState
 }
 
 func newStreamClient(c *Client) *StreamClient {
@@ -121,9 +127,10 @@ func newStreamClient(c *Client) *StreamClient {
 	}
 }
 
-// Close shuts the underlying public WS connection down. Idempotent;
-// callers without explicit shutdown can rely on the connection being
-// torn down with the rest of the desk on process exit.
+// Close shuts BOTH the public and the private WS connections down.
+// Idempotent; callers without explicit shutdown can rely on the
+// connections being torn down with the rest of the desk on process
+// exit.
 func (s *StreamClient) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -132,6 +139,7 @@ func (s *StreamClient) Close() error {
 			s.publicConn = nil
 		}
 		s.mu.Unlock()
+		s.closePrivate()
 	})
 	return nil
 }

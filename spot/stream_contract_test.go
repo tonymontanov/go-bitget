@@ -136,6 +136,18 @@ func (m *streamMockServer) handle(w http.ResponseWriter, r *http.Request) {
 			_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
 			continue
 		}
+		// Login frames carry credentials in the args[] payload, which
+		// the mock does not validate — every key/passphrase combination
+		// is accepted. Tests that need failure paths can extend the
+		// mock to return a non-zero code. Required for M5 private
+		// channels (WatchOrders): ws.Conn refuses to ship a Subscribe
+		// op until the supervisor sees a successful login ack.
+		if strings.HasPrefix(string(body), `{"op":"login"`) {
+			m.writeMu.Lock()
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"login","code":"0"}`))
+			m.writeMu.Unlock()
+			continue
+		}
 		var op struct {
 			Op   string              `json:"op"`
 			Args []map[string]string `json:"args"`
