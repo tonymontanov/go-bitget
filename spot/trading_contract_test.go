@@ -254,6 +254,49 @@ func TestContract_Spot_ModifyOrder_AutoFillsNewClientOid(t *testing.T) {
 	}
 }
 
+// TestContract_Spot_ModifyOrder_ReturnsRotatedClientOid pins the live wire
+// behaviour that caused chase orders to hang: on cancel-replace the venue
+// echoes the OLD (requested) clientOid and leaves orderId empty, yet the
+// surviving order's clientOid is the newClientOid we sent. The SDK MUST
+// return that new clientOid so the caller can address the live order next.
+func TestContract_Spot_ModifyOrder_ReturnsRotatedClientOid(t *testing.T) {
+	t.Parallel()
+	const fixture = `{
+		"code":"00000","msg":"success","requestTime":0,
+		"data":{"orderId":"","clientOid":"core-uuid-OLD","success":"success","msg":""}
+	}`
+
+	var rec requestRecorder
+	var client *bitget.Client
+	_, client = mockBitget(t, map[string]string{
+		"/api/v2/spot/trade/cancel-replace-order": fixture,
+	}, func(t *testing.T, r *http.Request) { rec.record(r) })
+
+	var info spottypes.OrderInfo
+	var err error
+	info, err = spotOf(client).Trading().ModifyOrder(context.Background(), spottypes.ModifyOrderRequest{
+		Symbol:        "BTCUSDT",
+		ClientOrderID: "core-uuid-OLD",
+		NewQuantity:   decimal.RequireFromString("0.002"),
+		NewPrice:      decimal.RequireFromString("43400"),
+	})
+	if err != nil {
+		t.Fatalf("ModifyOrder: %v", err)
+	}
+
+	var _, body, _ = rec.snapshot()
+	var sentNewOid, _ = body["newClientOid"].(string)
+	if sentNewOid == "" {
+		t.Fatalf("newClientOid not sent: %v", body)
+	}
+	if info.ClientOrderID != sentNewOid {
+		t.Fatalf("ClientOrderID must equal the rotated newClientOid %q, got %q", sentNewOid, info.ClientOrderID)
+	}
+	if info.ClientOrderID == "core-uuid-OLD" {
+		t.Fatalf("must NOT return the echoed OLD clientOid")
+	}
+}
+
 func TestContract_Spot_ModifyOrder_RejectsDuplicateClientOid(t *testing.T) {
 	t.Parallel()
 

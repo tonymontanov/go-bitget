@@ -266,8 +266,15 @@ func (t *TradingClient) ModifyOrder(ctx context.Context, req spottypes.ModifyOrd
 		)
 	}
 	return spottypes.OrderInfo{
-		OrderID:       data.OrderID,
-		ClientOrderID: bgcommon.ChooseClientOid(data.ClientOid, newClientOid),
+		OrderID: data.OrderID,
+		// CRITICAL: a cancel-replace ROTATES the clientOid — the surviving
+		// order's clientOid becomes newClientOid (the value we sent). The
+		// response's `clientOid` echoes the OLD (requested) clientOid and
+		// `orderId` is empty, so NEITHER identifies the live order. Return
+		// newClientOid so the caller can address the order on the next
+		// amend/cancel. (Verified on live PARTIUSDT: response was
+		// {"orderId":"","clientOid":"<old>","success":"success"}.)
+		ClientOrderID: newClientOid,
 		Symbol:        req.Symbol,
 		Status:        roottypes.OrderStatusLive,
 		Quantity:      req.NewQuantity,
@@ -926,8 +933,13 @@ func collateModifyResults(
 			continue
 		}
 		results[i].Order = &spottypes.OrderInfo{
-			OrderID:       row.OrderID,
-			ClientOrderID: bgcommon.ChooseClientOid(row.ClientOid, resolvedNewOid[i]),
+			OrderID: row.OrderID,
+			// Cancel-replace ROTATES the clientOid: the surviving order's
+			// clientOid is resolvedNewOid[i] (what we sent), NOT the echoed
+			// row.ClientOid (the OLD id) — same wire behaviour as the
+			// single-order path. Return the new one so callers can address
+			// the live order on the next amend/cancel.
+			ClientOrderID: resolvedNewOid[i],
 			Symbol:        reqs[i].Symbol,
 			Status:        roottypes.OrderStatusLive,
 			Quantity:      reqs[i].NewQuantity,
