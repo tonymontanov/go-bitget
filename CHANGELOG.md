@@ -4,6 +4,36 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.5.0 — Unreleased (full-exchange coverage)
+
+Work-in-progress line on branch `v2.5`, cut from `main` at the `v2.0.0`
+GA. Goal: cover the whole Bitget exchange (margin, copy-trading, earn,
+convert, broker, common utilities) plus the V3 / UTA profile, in
+stepwise phases. SDK-only; the desk connector is untouched. Tag applied
+by the maintainer.
+
+### Phase 1 — Futures completeness (COIN-FUTURES / USDC-FUTURES)
+
+- **Pinned the COIN-FUTURES / USDC-FUTURES wire shapes.** The `mix/`
+  sub-clients were already parameterised by the `ClientSettings`
+  (`ProductType` / `MarginMode` / `MarginCoin`) trio, but every contract
+  test exercised only the default `USDT-FUTURES`, leaving the other two
+  product types reachable-but-unpinned. Added
+  `mix/producttype_contract_test.go`: a USDT/USDC/COIN matrix asserting,
+  per product type, that `productType` on the wire matches the pinned
+  setting and that `marginCoin` is `USDT` / `USDC` / OMITTED
+  (COIN-FUTURES leaves the field empty so Bitget infers the per-symbol
+  margin coin). Covers place-order, cancel-order, batch-place-order,
+  account, single-position and the public-WS subscribe `instType`. Plus
+  `defaultMarginCoinFor` unit coverage for all six product types
+  (incl. demo SUSDT / SCOIN / SUSDC) and a demo-product-type
+  construction test. No production-code change was required — the
+  routing was already correct; the COIN-FUTURES `marginCoin`-omission is
+  the SDK's documented assumption pending live confirmation.
+- **`examples/marketdata`** gained a read-only `-product-type` flag
+  (`USDT-FUTURES` default / `USDC-FUTURES` / `COIN-FUTURES`) so all
+  three futures product types can be exercised live without code edits.
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS

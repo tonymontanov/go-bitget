@@ -12,9 +12,13 @@ no API credentials required. Walks through:
 
 USAGE:
 
-	go run ./examples/marketdata             # defaults: BTCUSDT, 10 seconds
+	go run ./examples/marketdata             # defaults: BTCUSDT, USDT-FUTURES
 	go run ./examples/marketdata -symbol ETHUSDT -duration 30s
+	go run ./examples/marketdata -product-type USDC-FUTURES -symbol BTCPERP
+	go run ./examples/marketdata -product-type COIN-FUTURES -symbol BTCUSD
 
+The MIX profile covers all three futures product types — USDT-FUTURES
+(default), USDC-FUTURES and COIN-FUTURES — selected via -product-type.
 The example prints to stdout and never exits non-zero unless the
 network is unreachable or the SDK reports a hard error.
 */
@@ -39,8 +43,10 @@ import (
 func main() {
 	var symbol string
 	var duration time.Duration
-	flag.StringVar(&symbol, "symbol", "BTCUSDT", "MIX symbol (e.g. BTCUSDT, ETHUSDT)")
+	var productType string
+	flag.StringVar(&symbol, "symbol", "BTCUSDT", "MIX symbol (e.g. BTCUSDT, BTCPERP, BTCUSD)")
 	flag.DurationVar(&duration, "duration", 10*time.Second, "how long to keep the WS subscription open")
+	flag.StringVar(&productType, "product-type", "USDT-FUTURES", "futures product type: USDT-FUTURES, USDC-FUTURES or COIN-FUTURES")
 	flag.Parse()
 
 	var cfg bitget.Config = bitget.DefaultConfig()
@@ -52,10 +58,14 @@ func main() {
 	}
 	defer func() { _ = c.Close() }()
 
-	var mc *mix.Client = c.Mix().(*mix.Client)
+	// Build the MIX client pinned to the requested product type. The
+	// margin coin is derived automatically (USDT-FUTURES→USDT,
+	// USDC-FUTURES→USDC, COIN-FUTURES→inferred per symbol).
+	var mc *mix.Client = mix.NewClientWithProductType(c, roottypes.ProductType(productType))
 	if mc == nil {
-		log.Fatal("mix factory is not registered (this should not happen — the package is imported)")
+		log.Fatal("mix.NewClientWithProductType returned nil (parent client is nil)")
 	}
+	fmt.Printf("product type: %s (margin coin: %q)\n", mc.ProductType(), mc.MarginCoin())
 
 	var ctx context.Context
 	var cancel context.CancelFunc

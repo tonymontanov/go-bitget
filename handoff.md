@@ -10,7 +10,8 @@
 > internal context.
 
 Module path: `github.com/tonymontanov/go-bitget/v2`
-Last tagged milestone: **`v2.0.0-m6`** (latest stable line: **`v1.2.2`**).
+Last tagged release: **`v2.0.0`** (SPOT GA). Active dev branch: **`v2.5`**
+(full-exchange coverage; see Roadmap).
 
 ---
 
@@ -177,81 +178,67 @@ subscription (e.g. `WatchLastPrice` + `WatchSpread` both ride `WatchTicker`).
 | `v2.0.0-m4` | spot public WebSocket (orderbook via shared `bgcommon/orderbook.Engine`, 24h-rollup ticker, trades, kline); lifted `bgcommon/wsframes.go` |
 | `v2.0.0-m5` | spot private WS `WatchOrders` (instId="default" + client-side symbol filter; auth pre-flight → `ErrorKindAuth`) |
 | `v2.0.0-m6` | mix↔spot private-WS symmetry: `spot.WatchAccount` (per-asset) + `spot.WatchFills` + `mix.WatchFills`; shared `bgcommon.WSFeeDetail`; audited mix private streams to M5 test parity |
+| **`v2.0.0`** | **SPOT GA** — folded m1–m6 + four live PARTIUSDT wire fixes (candle granularity, batch-cancel path, cancel-replace `size`/`price`, rotated `newClientOid`) into a stable release; CHANGELOG roll-up; desk-core consumes the public tag |
 
 Desk-core (`bitget-connector` branch): MIX connector cycle (B3–B5) and Spot
 connector cycle (T2b account/history, T2c public WS, `WatchOpenOrders` over
 SDK m5 private streams) are implemented and tested against the local SDK.
 
-### 🔧 In progress / open decision
+### 🔧 In progress — `v2.5` (full-exchange coverage)
 
-**Active line: `v2.0` SPOT → production (GA roll-up).** Goal agreed with
-the owner: finish spot, cover it, smoke-test it, and add the missing
-rate-limiter so the spot connector can go live. v2.5 (UTA/V3 alongside
-V2 + remaining sections) starts only after spot is in production.
+**Active line: `v2.5` on branch `v2.5`** (cut from `main` at the
+`v2.0.0` GA). Goal agreed with the owner: cover the WHOLE Bitget
+exchange, including the V3 / UTA profile, done in stepwise phases with
+an owner review pause after each. Constraints reaffirmed: SDK-only (the
+desk connector is NOT touched in this line), strict two-layer
+discipline (lift shared into `bgcommon`, never cross-section reuse),
+package names mirror Bitget's own section naming, English GoDoc,
+contract tests at parity. **Definition of done = REST+WS coverage +
+unit/contract tests (httptest / mock WS); the owner validates live.**
 
-**Live-validated on `PARTIUSDT` spot (production account).** Bid/Ask
-Frontrun/Smooth/Default Chase + CQB Scale orders place, re-price and
-cancel cleanly; position tracks correctly. Four spot-only wire bugs
-surfaced by live runs and fixed (each had a contract test that had
-pinned the WRONG expectation, so they passed CI while failing the
-venue — all tests now pin the venue-correct shape):
+Agreed phase order:
 
-- **REST candle granularity (`code=400171`).** Spot `candles` needs the
-  `1min/1h/1day/...` alphabet, not MIX's `1m/1H/1D`. Added
-  `spotCandleGranularity`; MIX untouched.
-- **`CancelBatchOrders` path (HTTP 404).** Correct spot endpoint is
-  `/api/v2/spot/trade/batch-cancel-order` (was `cancel-batch-orders`).
-- **`ModifyOrder` / `ModifyBatchOrders` wire fields (`400172` / `40019`).**
-  Spot cancel-replace carries the new values under bare `size` / `price`
-  (NOT `newSize` / `newPrice` — that is MIX-only); both mandatory.
-  Validation now rejects a partial modify locally.
-- **Spot position (desk-core).** `GetSymbolPosition` / `WatchPosition`
-  resolve the base-coin balance (available+frozen+locked) instead of a
-  zero stub, so spot positions update via REST poll and WS.
-- **Rate-limiter pool split (desk-core).** `place` and `amend` are
-  independent Bitget pools (10 req/s each); `resolveCategoriesFor` now
-  gates a modify on `amend` only — a Scale place-burst no longer falsely
-  rejects chase modifies. Cancels bypass entirely
-  (`AlwaysAllowCancellation`).
+| Phase | Scope | State |
+| --- | --- | --- |
+| 0 | branch `v2.5` from `main` | ✅ |
+| 1 | **Futures completeness** — validate COIN-FUTURES / USDC-FUTURES across `mix/` and pin the wire deltas | ✅ (this session) |
+| 2 | `margin/` — cross + isolated (one package parameterised by mode) | 📋 |
+| 3 | Copy Trading — futures + spot | 📋 |
+| 4 | `earn/` + `convert/` | 📋 |
+| 5 | `broker/` (Agent) | 📋 |
+| 6 | Common / public utilities round-out | 📋 |
+| 7 | `uta/` — V3 Unified Trading Account (hedge mode, demo/testnet hosts) | 📋 |
 
-Done in this line (SDK + desk-core, on `main` / `bitget-connector`):
+**Phase 1 — done (futures completeness).** Audit confirmed every `mix/`
+REST/WS path already routes `productType` / `marginCoin` through the
+pinned `ClientSettings` (no hard-coded `USDT-FUTURES` in logic — only
+in comments/defaults), and the `ProductType` enum is complete
+(USDT/COIN/USDC + demo SUSDT/SCOIN/SUSDC). The gap was test coverage:
+no contract test exercised COIN/USDC. Added
+`mix/producttype_contract_test.go` — a product-type matrix
+(USDT/USDC/COIN) pinning the venue-visible deltas on place / cancel /
+batch-place / account / single-position / public-WS-subscribe:
 
-- **SDK examples** — added runnable spot demos mirroring the mix set:
-  `examples/spot-marketdata`, `examples/spot-place-order`,
-  `examples/spot-private-stream`, plus `examples/spot-smoke` — a
-  one-shot production-readiness harness (public REST/WS, signed REST,
-  private-WS login, post-only trading round-trip; PASS/FAIL/SKIP
-  summary; `-read-only` and public-only modes). Signed examples read
-  `BITGET_SPOT_*` with fallback to the generic `BITGET_*` triple.
-- **SPOT rate-limiter (desk-core)** — added
-  `internal/rate-limiter/bitget-spot-strategy.go` (+ `_test.go`),
-  wired `case *bitget_spot.BitgetSpotConnector` into
-  `internal/rate-limiter/factory.go`. The shared `bitget-base.go` was
-  made profile-aware via an **injectable endpoint resolver**
-  (`endpointResolver` + `cancelAllEndpoint` on `bitgetLimiterCore`):
-  nil → legacy MIX free-function (mix stays bit-identical, zero risk);
-  spot injects `/api/v2/spot/trade/*` paths so live `X-RateLimit-*`
-  header state and cancel-all detection work on the spot wire. This
-  closed the gap where `spot.connector.GetRateLimitChannel()` had no
-  consumer strategy.
-- **Audits (no code change)** — error-code coverage (`internal/bgerr`)
-  and SPOT↔MIX API parity both confirmed complete.
+- `productType` on the wire matches the pinned setting;
+- `marginCoin` = `USDT` / `USDC`, and is **OMITTED** for COIN-FUTURES
+  (coin-margined contracts use a per-symbol coin; the SDK lets Bitget
+  infer it from the symbol — `defaultMarginCoinFor` returns "");
+- public-WS subscribe `instType` follows the product type.
 
-**Published:** the GA-ready line (m1–m6 + the four live fixes above) is
-merged to **`origin/main`** so all SDK consumers get it, not just the
-local checkout. desk-core `go.mod` now references the public SDK module
-(local `replace` removed). Remaining for GA: maintainer cuts the
-`v2.0.0` tag (agent does NOT tag) and bumps desk-core's `require` from
-the current main pseudo-version to the clean `v2.0.0` tag.
+Plus `defaultMarginCoinFor` unit coverage for all six product types and
+a demo-product-type construction test. `examples/marketdata` gained a
+`-product-type` flag (read-only) so coin/usdc can be exercised live.
+No production-code change was required — the routing was already
+correct; the COIN-FUTURES `marginCoin`-omission is the SDK's documented
+assumption, to be confirmed by the owner's live smoke run.
 
 ### 📋 Planned
 
-- **`v2.0` GA** — fold the m1–m6 milestones into a stable spot release
-  (final error-code audit, examples, CHANGELOG roll-up).
-- **`v2.5` — `uta/` profile** — Bitget V3 Unified Trading Account: hedge
-  mode, demo / testnet hosts (URL constants intentionally NOT shipped
-  yet). `WatchPositions` stays mix-only by venue contract; UTA reintroduces
-  unified positions.
+- **`v2.5` phases 2–7** — see the table above. Each phase: two-layer
+  (lift shared into `bgcommon`), contract tests at parity, then a
+  review pause. `uta/` is additive and must not change V2 behaviour;
+  `WatchPositions` stays mix-only by venue contract until UTA
+  reintroduces unified positions.
 
 ---
 
