@@ -34,6 +34,37 @@ by the maintainer.
   (`USDT-FUTURES` default / `USDC-FUTURES` / `COIN-FUTURES`) so all
   three futures product types can be exercised live without code edits.
 
+### Phase 2 — MARGIN profile (crossed + isolated) — in progress
+
+New top-level package `margin/` for Bitget V2 leveraged spot trading.
+Margin trades SPOT instruments with borrowed funds; the **mode**
+(`crossed` / `isolated`) selects the URL path segment on every endpoint
+(`/api/v2/margin/<mode>/...`) and is pinned at construction time via
+`margin.ClientSettings{Mode}` (reusing the existing `roottypes.MarginMode`
+— no new enum). `bitget.Client.Margin()` lazily returns the crossed
+default; isolated callers use `margin.NewClientWithSettings`. SDK-only;
+the desk connector is untouched.
+
+- **M1 — scaffold.** Root `Margin()` factory (same lazy-init pattern as
+  `Mix()` / `Spot()`); `margin.Client` with `ClientSettings{Mode}` and
+  the `Trading` / `Account` / `Public` / `Stream` sub-clients;
+  `margin/types` (`CreateOrderRequest` with `BaseSize` / `QuoteSize` /
+  `LoanType` / `STPMode`, `OrderInfo`, `BatchOrderResult`, and the
+  `LoanType` / `STPMode` enums). Account / Public / Stream are stubs
+  filled in M3 / M4.
+- **M2 — Trading REST.** `CreateOrder`, `CreateBatchOrders`,
+  `CancelOrder`, `CancelBatchOrders` against
+  `/api/v2/margin/<mode>/{place-order,batch-place-order,cancel-order,batch-cancel-order}`.
+  Margin has **no amend endpoint** (Bitget ships none — a re-price is a
+  cancel + fresh place owned by the caller). Wire specifics pinned by
+  `margin/trading_contract_test.go`: `loanType` always present
+  (defaults to `normal`); side-dependent size (`baseSize` for limit /
+  market-sell, `quoteSize` for market-buy, the other omitted); `force`
+  only on limit; optional `stpMode`; per-symbol batch with the standard
+  `{successList, failureList}` collation. The crossed/isolated path
+  segment is asserted by a mode matrix. Shared batch / clientOid / error
+  helpers reused from `internal/bgcommon` (no copy-paste from `spot/`).
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS

@@ -55,6 +55,9 @@ type Client struct {
 
 	utaOnce sync.Once
 	utaVal  any
+
+	marginOnce sync.Once
+	marginVal  any
 }
 
 // NewClient validates cfg, fills defaults, and returns a configured root
@@ -204,6 +207,35 @@ func (c *Client) UTA() any {
 		c.utaVal = utaFactory(c)
 	})
 	return c.utaVal
+}
+
+// marginFactory is set by margin.init() via RegisterMarginFactory.
+var marginFactory func(c *Client) any
+
+// RegisterMarginFactory wires the margin.Client builder. Idempotent.
+// Available from v2.5; v1.0 / v2.0 ship only the mix / spot profiles.
+func RegisterMarginFactory(f func(c *Client) any) {
+	if marginFactory == nil {
+		marginFactory = f
+	}
+}
+
+// Margin returns the *margin.Client (typed as any). nil when the margin
+// package has not been imported. Available from v2.5.
+//
+// The lazy entry point returns the SDK default (crossed margin). Callers
+// that need isolated margin construct the margin.Client explicitly via
+// margin.NewClientWithSettings — same pattern as Mix() returning the
+// USDT-FUTURES default.
+func (c *Client) Margin() any {
+	c.marginOnce.Do(func() {
+		if marginFactory == nil {
+			c.logger.Warn(`bitget.Client.Margin: margin factory is not registered; available from v2.5`)
+			return
+		}
+		c.marginVal = marginFactory(c)
+	})
+	return c.marginVal
 }
 
 // Compile-time assertion: *Error implements the error interface.

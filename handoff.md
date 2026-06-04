@@ -122,6 +122,12 @@ go-bitget/
     stream-private.go  — private WS (orders / account / fills; NO positions — cash-only)
     types/             — spot-only domain types (AccountInfo, Fill, AccountUpdate, FillUpdate)
 
+  margin/              # v2.5 — Bitget margin (crossed + isolated)
+    client.go          — *margin.Client + ClientSettings{Mode} + RegisterMarginFactory (init)
+    trading.go         — place / batch-place / cancel / batch-cancel (no amend on margin)
+    account.go / public.go / stream.go — stubs (M3 account/records+currencies, M4 private WS)
+    types/             — margin-only domain types (CreateOrderRequest, OrderInfo, LoanType, STPMode)
+
   uta/                 # v2.5 — Unified Trading Account (planned, not started)
   examples/            # runnable demos. MIX: marketdata / place-order /
                        #   private-stream. SPOT: spot-marketdata /
@@ -202,7 +208,7 @@ Agreed phase order:
 | --- | --- | --- |
 | 0 | branch `v2.5` from `main` | ✅ |
 | 1 | **Futures completeness** — validate COIN-FUTURES / USDC-FUTURES across `mix/` and pin the wire deltas | ✅ (this session) |
-| 2 | `margin/` — cross + isolated (one package parameterised by mode) | 📋 |
+| 2 | `margin/` — cross + isolated (one package parameterised by mode) | 🔧 M1+M2 done (this session) |
 | 3 | Copy Trading — futures + spot | 📋 |
 | 4 | `earn/` + `convert/` | 📋 |
 | 5 | `broker/` (Agent) | 📋 |
@@ -231,6 +237,41 @@ a demo-product-type construction test. `examples/marketdata` gained a
 No production-code change was required — the routing was already
 correct; the COIN-FUTURES `marginCoin`-omission is the SDK's documented
 assumption, to be confirmed by the owner's live smoke run.
+
+**Phase 2 — in progress (`margin/`, crossed + isolated).** New top-level
+package `margin/`. Design agreed with the owner: ONE package
+parameterised by **mode** (`crossed` / `isolated`) pinned at
+construction via `margin.ClientSettings{Mode}` (reusing the existing
+`roottypes.MarginMode` — no new enum). The mode drives the URL path
+segment on every endpoint (`/api/v2/margin/<mode>/...`); the literal
+segment is `crossed` / `isolated` (NOT `cross` — the V2 release-note
+column is stale; confirmed against the live Cross-Place-Order doc and
+`assertMarginType: crossed|isolated`). `bitget.Client.Margin()` returns
+the crossed default; isolated callers use `NewClientWithSettings`.
+Margin trades SPOT instruments, so there is **no margin market-data** —
+prices/books/candles come from the `spot` profile; the only public
+margin endpoint is `/api/v2/margin/currencies` (M3). **No public margin
+WS** — only private `account-<mode>` / `orders-<mode>` on
+instType=`MARGIN` (M4).
+
+Milestone state:
+
+- **M1 (scaffold) — done.** Root `Margin()` factory; `margin.Client` +
+  `ClientSettings{Mode}` + `Trading`/`Account`/`Public`/`Stream`
+  sub-clients; `margin/types` (`CreateOrderRequest` with
+  `BaseSize`/`QuoteSize`/`LoanType`/`STPMode`, `OrderInfo`,
+  `BatchOrderResult`, `LoanType`/`STPMode` enums). Account/Public/Stream
+  are stubs.
+- **M2 (Trading REST) — done.** `CreateOrder` / `CreateBatchOrders` /
+  `CancelOrder` / `CancelBatchOrders`. **No amend endpoint exists on
+  margin** (Bitget ships none). Pinned by `margin/trading_contract_test.go`:
+  crossed/isolated path matrix; `loanType` always on the wire (default
+  `normal`); side-dependent size (`baseSize` limit/market-sell,
+  `quoteSize` market-buy, other omitted); `force` limit-only; optional
+  `stpMode`; per-symbol batch + `{successList,failureList}` collation.
+  Shared helpers reused from `bgcommon` (no `spot/` reuse, no copy-paste).
+- **M3 (Account/assets + borrow/repay/records + currencies) — next.**
+- **M4 (private WS `account-<mode>` / `orders-<mode>`) — after M3.**
 
 ### 📋 Planned
 
