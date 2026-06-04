@@ -58,6 +58,9 @@ type Client struct {
 
 	marginOnce sync.Once
 	marginVal  any
+
+	copyTradingOnce sync.Once
+	copyTradingVal  any
 }
 
 // NewClient validates cfg, fills defaults, and returns a configured root
@@ -236,6 +239,36 @@ func (c *Client) Margin() any {
 		c.marginVal = marginFactory(c)
 	})
 	return c.marginVal
+}
+
+// copyTradingFactory is set by copytrading.init() via
+// RegisterCopyTradingFactory.
+var copyTradingFactory func(c *Client) any
+
+// RegisterCopyTradingFactory wires the copytrading.Client builder.
+// Idempotent. Available from v2.5.
+func RegisterCopyTradingFactory(f func(c *Client) any) {
+	if copyTradingFactory == nil {
+		copyTradingFactory = f
+	}
+}
+
+// CopyTrading returns the *copytrading.Client (typed as any). nil when
+// the copytrading package has not been imported. Available from v2.5.
+//
+// The lazy entry point returns the SDK default (USDT-FUTURES product
+// type for the futures sub-clients). Callers needing a different futures
+// product type construct the copytrading.Client explicitly via
+// copytrading.NewClientWithSettings — same pattern as Mix() / Margin().
+func (c *Client) CopyTrading() any {
+	c.copyTradingOnce.Do(func() {
+		if copyTradingFactory == nil {
+			c.logger.Warn(`bitget.Client.CopyTrading: copytrading factory is not registered; available from v2.5`)
+			return
+		}
+		c.copyTradingVal = copyTradingFactory(c)
+	})
+	return c.copyTradingVal
 }
 
 // Compile-time assertion: *Error implements the error interface.
