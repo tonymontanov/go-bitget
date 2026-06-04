@@ -14,6 +14,16 @@ an error-code audit). Tag is applied by the maintainer.
 
 ### Fixed
 
+- **`spot.Trading.CancelBatchOrders` endpoint path (HTTP 404).** The
+  method POSTed to `/api/v2/spot/trade/cancel-batch-orders`, which does
+  not exist — Bitget V2 spot batch cancellation lives at
+  `/api/v2/spot/trade/batch-cancel-order`. Every batch cancel returned
+  `404 Not Found`, so ladder/scale strategies could not tear down their
+  open orders in bulk (production regression observed on `PARTIUSDT`:
+  desk "orders not cancelled in batch"). Corrected the path; the
+  request/response shape (`symbol` + `orderList`, `{successList,
+  failureList}` envelope) was already correct. The contract test had
+  pinned the wrong path; it now asserts `batch-cancel-order`.
 - **`spot.MarketData.GetHistoricalCandles` granularity (code=400171).**
   The spot `/api/v2/spot/market/candles` endpoint rejects the
   `roottypes.Timeframe.Wire()` tokens that MIX uses (`1m` / `1H` / `1D`)

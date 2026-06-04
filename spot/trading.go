@@ -10,7 +10,7 @@ single + batch place / amend / cancel endpoint:
   - POST /api/v2/spot/trade/cancel-replace-order      — ModifyOrder
   - POST /api/v2/spot/trade/batch-cancel-replace-order — ModifyBatchOrders
   - POST /api/v2/spot/trade/cancel-order              — CancelOrder
-  - POST /api/v2/spot/trade/cancel-batch-orders       — CancelBatchOrders
+  - POST /api/v2/spot/trade/batch-cancel-order         — CancelBatchOrders
   - POST /api/v2/spot/trade/cancel-symbol-order       — CancelAllOrders
 
 DIFFERENCES FROM mix.TradingClient:
@@ -169,6 +169,17 @@ type modifyOrderResp struct {
 }
 
 // ModifyOrder amends size and / or price on an open spot order.
+//
+// WIRE CONTRACT — both fields required: the spot endpoint is a native
+// cancel-replace-order, i.e. a full re-placement of the order. Bitget
+// rejects a request that omits either side with code=400172
+// ("size...spot.order.size.empty" / "price...spot.order.price.empty").
+// Callers that only want to change one dimension (e.g. a pure re-price)
+// MUST still echo the unchanged value of the other. The SDK does not
+// fetch the live order to backfill the missing side — that is an
+// application-layer policy (a REST round-trip) and the desk connector
+// owns it. The SDK only enforces that at least one side is present so a
+// genuine no-op modify fails fast locally.
 //
 // Identification: either OrderID or ClientOrderID points at the
 // existing order. If both are populated, OrderID wins (Bitget's
@@ -504,7 +515,7 @@ func (t *TradingClient) ModifyBatchOrders(ctx context.Context, reqs []spottypes.
 // ---------------------------------------------------------------------
 
 // batchCancelOrderBody is the wire payload for
-// /api/v2/spot/trade/cancel-batch-orders. Like batch-orders, it pins
+// /api/v2/spot/trade/batch-cancel-order. Like batch-orders, it pins
 // `symbol` at the top level and the SDK enforces homogeneity.
 type batchCancelOrderBody struct {
 	Symbol      string                  `json:"symbol"`
@@ -553,7 +564,7 @@ func (t *TradingClient) CancelBatchOrders(ctx context.Context, reqs []roottypes.
 	var resp rest.Response
 	resp, _, err = t.c.rest().Do(ctx, rest.Options{
 		Method: "POST",
-		Path:   "/api/v2/spot/trade/cancel-batch-orders",
+		Path:   "/api/v2/spot/trade/batch-cancel-order",
 		Body:   body,
 		Signed: true,
 		Meta: rest.RequestMeta{

@@ -513,7 +513,7 @@ func TestContract_Spot_CancelBatchOrders_Happy(t *testing.T) {
 	var rec requestRecorder
 	var client *bitget.Client
 	_, client = mockBitget(t, map[string]string{
-		"/api/v2/spot/trade/cancel-batch-orders": fixture,
+		"/api/v2/spot/trade/batch-cancel-order": fixture,
 	}, func(t *testing.T, r *http.Request) { rec.record(r) })
 
 	var reqs []roottypes.CancelOrderRequest = []roottypes.CancelOrderRequest{
@@ -539,7 +539,7 @@ func TestContract_Spot_CancelBatchOrders_Happy(t *testing.T) {
 	var path string
 	var body map[string]any
 	path, body, _ = rec.snapshot()
-	if path != "/api/v2/spot/trade/cancel-batch-orders" {
+	if path != "/api/v2/spot/trade/batch-cancel-order" {
 		t.Fatalf("path: %q", path)
 	}
 	if body["symbol"] != "BTCUSDT" {
