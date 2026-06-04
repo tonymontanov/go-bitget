@@ -4,15 +4,33 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v2.0.0 — Unreleased (SPOT GA roll-up)
+## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS
 surface beyond `v2.0.0-m6` — this release folds milestones `m1`–`m6`
 into a stable line and closes the production-readiness gaps the
 milestones left open (runnable spot examples, a live smoke harness, and
-an error-code audit). Tag is applied by the maintainer.
+an error-code audit). Validated live on `PARTIUSDT` (Chase / CQB Scale)
+end-to-end: place → amend → cancel with correct position tracking.
 
 ### Fixed
+
+- **`spot.Trading.ModifyOrder` / `ModifyBatchOrders` returned a stale
+  `clientOid` after a cancel-replace (live "hanging orders").** Bitget
+  spot `cancel-replace-order` / `batch-cancel-replace-order` is a native
+  cancel-replace that **rotates the `clientOid`**: the surviving order
+  adopts the `newClientOid` we send. The HTTP-200 response, however,
+  returns an **empty `orderId`** and **echoes the OLD requested
+  `clientOid`** (`{"orderId":"","clientOid":"<old>","success":"success"}`),
+  so neither field in the response identifies the live order. The SDK
+  selected the echoed old id via `ChooseClientOid`, so callers kept
+  addressing a stale id; the next amend/cancel missed the live order
+  (venue replied `该订单已成交或者已撤单` / `43001 订单不存在`) and the
+  order hung on the book. `ModifyOrder` now returns the `newClientOid`
+  and `ModifyBatchOrders` returns `resolvedNewOid[i]` as the result
+  `ClientOrderID` — the real post-rotation id — so callers can address
+  the order on the next amend/cancel. Verified live on `PARTIUSDT`;
+  pinned by `TestContract_Spot_ModifyOrder_ReturnsRotatedClientOid`.
 
 - **`spot.Trading.ModifyBatchOrders` response decoding (parse panic
   "expect { but found [").** `batch-cancel-replace-order` returns a
