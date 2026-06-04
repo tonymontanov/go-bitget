@@ -14,6 +14,17 @@ an error-code audit). Tag is applied by the maintainer.
 
 ### Fixed
 
+- **`spot.Trading.ModifyBatchOrders` response decoding (parse panic
+  "expect { but found [").** `batch-cancel-replace-order` returns a
+  **flat array** of per-row outcomes in request order
+  (`[{orderId,clientOid,success,msg}]`), NOT the `{successList,
+  failureList}` envelope used by `batch-orders` / `batch-cancel-order`.
+  Decoding it as `BatchEnvelope` failed every batch modify. Added a
+  dedicated array row type + positional collation, and a per-row
+  `success":"failure"` now surfaces as a typed row error. `ModifyOrder`
+  (single) likewise now inspects the `success` flag so a venue-rejected
+  amend on an HTTP-200 envelope returns an error instead of a phantom
+  success. Production regression observed on `PARTIUSDT`.
 - **`spot.Trading.ModifyOrder` / `ModifyBatchOrders` wire field names
   (code=400172 / 40019).** The cancel-replace bodies serialized the new
   amount/price under `newSize` / `newPrice`, but Bitget V2 spot

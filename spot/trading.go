@@ -46,6 +46,7 @@ package spot
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/shopspring/decimal"
 
@@ -167,10 +168,16 @@ type modifyOrderBody struct {
 
 // modifyOrderResp is the JSON `data` returned by cancel-replace-order.
 // Bitget echoes the new orderId / clientOid (modify is implemented
-// as a cancel-replace at the matcher level — hence a NEW orderId).
+// as a cancel-replace at the matcher level — hence a NEW orderId) plus
+// a per-order `success` ("success" | "failure") flag and a `msg` reason:
+// the HTTP envelope can be code=00000 while the individual amend still
+// failed (e.g. the order vanished mid-flight), so the SDK must inspect
+// `success` rather than trust the 200.
 type modifyOrderResp struct {
 	OrderID   string `json:"orderId"`
 	ClientOid string `json:"clientOid"`
+	Success   string `json:"success"`
+	Msg       string `json:"msg"`
 }
 
 // ModifyOrder re-prices and / or re-sizes an open spot order.
@@ -251,6 +258,12 @@ func (t *TradingClient) ModifyOrder(ctx context.Context, req spottypes.ModifyOrd
 	var data modifyOrderResp
 	if err = resp.UnmarshalData(&data); err != nil {
 		return out, bitget.NewError(bitget.ErrorKindUnknown, "", "spot.Trading.ModifyOrder: parse", err)
+	}
+	if isSpotModifyFailure(data.Success) {
+		return out, bitget.NewError(
+			bitget.MapBitgetCode("", data.Msg), "",
+			"spot.Trading.ModifyOrder: venue rejected amend: "+data.Msg, nil,
+		)
 	}
 	return spottypes.OrderInfo{
 		OrderID:       data.OrderID,
@@ -507,12 +520,34 @@ func (t *TradingClient) ModifyBatchOrders(ctx context.Context, reqs []spottypes.
 		return nil, err
 	}
 
-	var data bgcommon.BatchEnvelope
-	if err = resp.UnmarshalData(&data); err != nil {
+	// IMPORTANT: unlike batch-orders / batch-cancel-order (which return a
+	// {successList, failureList} envelope), batch-cancel-replace-order
+	// returns a FLAT array of per-row outcomes in request order, each
+	// tagged with `success` / `msg`. Decoding it as a BatchEnvelope fails
+	// with "expect { but found [".
+	var rows []batchModifyResultRow
+	if err = resp.UnmarshalData(&rows); err != nil {
 		return nil, bitget.NewError(bitget.ErrorKindUnknown, "", "spot.Trading.ModifyBatchOrders: parse", err)
 	}
 
-	return collateModifyResults(reqs, resolvedNewOid, data), nil
+	return collateModifyResults(reqs, resolvedNewOid, rows), nil
+}
+
+// batchModifyResultRow is one element of the batch-cancel-replace-order
+// response `data` array. clientOid may arrive as JSON null (→ "").
+type batchModifyResultRow struct {
+	OrderID   string `json:"orderId"`
+	ClientOid string `json:"clientOid"`
+	Success   string `json:"success"`
+	Msg       string `json:"msg"`
+}
+
+// isSpotModifyFailure reports whether a per-order `success` flag signals
+// a venue-side rejection. Only an explicit "failure" counts; an empty or
+// "success" value is treated as success (lenient — avoids inventing
+// errors if the venue omits the flag).
+func isSpotModifyFailure(success string) bool {
+	return strings.EqualFold(strings.TrimSpace(success), "failure")
 }
 
 // ---------------------------------------------------------------------
@@ -857,91 +892,67 @@ func collateCreateResults(
 
 /*
 collateModifyResults pairs batch-modify outcomes with the originating
-ModifyOrderRequest rows. Modify responses echo the NEW orderId +
-clientOid (the new clientOid the SDK either accepted from the caller
-or auto-filled). Pairing therefore happens via the resolved
-newClientOid slice — never via the input clientOid (which Bitget
-already replaced in its own bookkeeping).
+ModifyOrderRequest rows.
+
+WIRE SHAPE: batch-cancel-replace-order returns a FLAT array of per-row
+results in REQUEST order (not a success/failure envelope), each carrying
+the NEW orderId, an echoed clientOid (often null), a `success` flag and a
+`msg` reason. Pairing is therefore POSITIONAL — the only reliable join,
+since the venue routinely nulls clientOid on modify. clientOid is used
+only as a display value, never as the join key.
 */
 func collateModifyResults(
 	reqs []spottypes.ModifyOrderRequest,
 	resolvedNewOid []string,
-	data bgcommon.BatchEnvelope,
+	rows []batchModifyResultRow,
 ) []spottypes.BatchOrderResult {
 	var results []spottypes.BatchOrderResult = make([]spottypes.BatchOrderResult, len(reqs))
-	var byNewClientOid map[string]*spottypes.BatchOrderResult = map[string]*spottypes.BatchOrderResult{}
-	var positional []*spottypes.BatchOrderResult
 	var i int
 	for i = 0; i < len(reqs); i++ {
 		results[i] = spottypes.BatchOrderResult{ClientOrderID: resolvedNewOid[i]}
-		if resolvedNewOid[i] != "" {
-			byNewClientOid[resolvedNewOid[i]] = &results[i]
-		} else {
-			positional = append(positional, &results[i])
-		}
 	}
 
-	var ok bgcommon.BatchSuccessRow
-	var idx int = 0
-	for _, ok = range data.SuccessList {
-		var target *spottypes.BatchOrderResult
-		if ok.ClientOid != "" {
-			target = byNewClientOid[ok.ClientOid]
+	var paired int = len(rows)
+	if paired > len(reqs) {
+		paired = len(reqs)
+	}
+	for i = 0; i < paired; i++ {
+		var row batchModifyResultRow = rows[i]
+		if isSpotModifyFailure(row.Success) {
+			results[i].Err = bitget.NewError(
+				bitget.MapBitgetCode("", row.Msg), "",
+				"spot.Trading.ModifyBatchOrders: venue rejected amend: "+row.Msg, nil,
+			)
+			continue
 		}
-		if target == nil && idx < len(positional) {
-			target = positional[idx]
-			idx++
-		}
-		var reqIdx int = -1
-		if target != nil {
-			reqIdx, _ = findResultIndex(results, target)
-		}
-		var info *spottypes.OrderInfo = &spottypes.OrderInfo{
-			OrderID:       ok.OrderID,
-			ClientOrderID: bgcommon.ChooseClientOid(ok.ClientOid, ""),
+		results[i].Order = &spottypes.OrderInfo{
+			OrderID:       row.OrderID,
+			ClientOrderID: bgcommon.ChooseClientOid(row.ClientOid, resolvedNewOid[i]),
+			Symbol:        reqs[i].Symbol,
 			Status:        roottypes.OrderStatusLive,
+			Quantity:      reqs[i].NewQuantity,
+			Price:         reqs[i].NewPrice,
 		}
-		if reqIdx >= 0 {
-			info.Symbol = reqs[reqIdx].Symbol
-			info.Quantity = reqs[reqIdx].NewQuantity
-			info.Price = reqs[reqIdx].NewPrice
-			info.ClientOrderID = bgcommon.ChooseClientOid(ok.ClientOid, resolvedNewOid[reqIdx])
-		}
-		if target == nil {
-			results = append(results, spottypes.BatchOrderResult{
-				ClientOrderID: info.ClientOrderID,
-				Order:         info,
-			})
-			continue
-		}
-		target.Order = info
 	}
 
-	var fail bgcommon.BatchFailureRow
-	idx = 0
-	for _, fail = range data.FailureList {
-		var target *spottypes.BatchOrderResult
-		if fail.ClientOid != "" {
-			target = byNewClientOid[fail.ClientOid]
+	// Defensive: the venue returned more rows than we sent. Should never
+	// happen, but surface the extras instead of dropping them silently.
+	for i = paired; i < len(rows); i++ {
+		var row batchModifyResultRow = rows[i]
+		var extra spottypes.BatchOrderResult = spottypes.BatchOrderResult{ClientOrderID: row.ClientOid}
+		if isSpotModifyFailure(row.Success) {
+			extra.Err = bitget.NewError(
+				bitget.MapBitgetCode("", row.Msg), "",
+				"spot.Trading.ModifyBatchOrders: venue rejected amend: "+row.Msg, nil,
+			)
+		} else {
+			extra.Order = &spottypes.OrderInfo{
+				OrderID:       row.OrderID,
+				ClientOrderID: row.ClientOid,
+				Status:        roottypes.OrderStatusLive,
+			}
 		}
-		if target == nil && idx < len(positional) {
-			target = positional[idx]
-			idx++
-		}
-		var perRowErr error = bitget.NewError(
-			bitget.MapBitgetCode(fail.ErrorCode, fail.ErrorMsg),
-			fail.ErrorCode,
-			fail.ErrorMsg,
-			nil,
-		)
-		if target == nil {
-			results = append(results, spottypes.BatchOrderResult{
-				ClientOrderID: fail.ClientOid,
-				Err:           perRowErr,
-			})
-			continue
-		}
-		target.Err = perRowErr
+		results = append(results, extra)
 	}
 
 	return results

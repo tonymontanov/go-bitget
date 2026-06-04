@@ -404,15 +404,14 @@ func TestContract_Spot_CreateBatchOrders_HeterogeneousSymbol(t *testing.T) {
 
 func TestContract_Spot_ModifyBatchOrders_NativeSingleRPC(t *testing.T) {
 	t.Parallel()
+	// batch-cancel-replace-order returns a FLAT array (per-row order),
+	// NOT a {successList, failureList} envelope.
 	const fixture = `{
 		"code":"00000","msg":"success","requestTime":0,
-		"data":{
-			"successList":[
-				{"orderId":"new-1","clientOid":"s-aaaa"},
-				{"orderId":"new-2","clientOid":"s-bbbb"}
-			],
-			"failureList":[]
-		}
+		"data":[
+			{"orderId":"new-1","clientOid":"s-aaaa","success":"success","msg":null},
+			{"orderId":"new-2","clientOid":"s-bbbb","success":"success","msg":null}
+		]
 	}`
 
 	var hits int32
@@ -464,9 +463,51 @@ func TestContract_Spot_ModifyBatchOrders_NativeSingleRPC(t *testing.T) {
 	}
 }
 
+// TestContract_Spot_ModifyBatchOrders_PerRowFailure pins that a per-row
+// `success":"failure"` in the flat-array response surfaces as a typed
+// row Err (positional pairing), while the sibling row still succeeds.
+func TestContract_Spot_ModifyBatchOrders_PerRowFailure(t *testing.T) {
+	t.Parallel()
+	const fixture = `{
+		"code":"00000","msg":"success","requestTime":0,
+		"data":[
+			{"orderId":"new-1","clientOid":"s-aaaa","success":"success","msg":null},
+			{"orderId":"","clientOid":null,"success":"failure","msg":"order does not exist"}
+		]
+	}`
+
+	var client *bitget.Client
+	_, client = mockBitget(t, map[string]string{
+		"/api/v2/spot/trade/batch-cancel-replace-order": fixture,
+	}, nil)
+
+	var reqs []spottypes.ModifyOrderRequest = []spottypes.ModifyOrderRequest{
+		{Symbol: "BTCUSDT", ClientOrderID: "core-1", NewClientOrderID: "s-aaaa", NewQuantity: decimal.RequireFromString("0.001"), NewPrice: decimal.RequireFromString("43500")},
+		{Symbol: "BTCUSDT", ClientOrderID: "core-2", NewClientOrderID: "s-bbbb", NewQuantity: decimal.RequireFromString("0.002"), NewPrice: decimal.RequireFromString("43600")},
+	}
+	var results []spottypes.BatchOrderResult
+	var err error
+	results, err = spotOf(client).Trading().ModifyBatchOrders(context.Background(), reqs)
+	if err != nil {
+		t.Fatalf("ModifyBatchOrders (transport): %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("len(results): want 2, got %d", len(results))
+	}
+	if results[0].Order == nil || results[0].Order.OrderID != "new-1" {
+		t.Errorf("results[0] should succeed: %+v", results[0])
+	}
+	if results[1].Err == nil {
+		t.Fatalf("results[1] should carry the venue rejection")
+	}
+	if !strings.Contains(results[1].Err.Error(), "order does not exist") {
+		t.Errorf("results[1].Err should echo the venue msg, got %v", results[1].Err)
+	}
+}
+
 func TestContract_Spot_ModifyBatchOrders_AutoFillsNewClientOid(t *testing.T) {
 	t.Parallel()
-	const fixture = `{"code":"00000","msg":"success","requestTime":0,"data":{"successList":[],"failureList":[]}}`
+	const fixture = `{"code":"00000","msg":"success","requestTime":0,"data":[{"orderId":"new-1","clientOid":null,"success":"success","msg":null},{"orderId":"new-2","clientOid":null,"success":"success","msg":null}]}`
 
 	var rec requestRecorder
 	var client *bitget.Client
