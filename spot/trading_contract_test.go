@@ -240,11 +240,17 @@ func TestContract_Spot_ModifyOrder_AutoFillsNewClientOid(t *testing.T) {
 	if body["clientOid"] != "core-uuid-1" {
 		t.Errorf("clientOid: %v", body["clientOid"])
 	}
-	if body["newSize"] != "0.002" {
-		t.Errorf("newSize: %v", body["newSize"])
+	if body["size"] != "0.002" {
+		t.Errorf("size: %v", body["size"])
 	}
-	if body["newPrice"] != "43400" {
-		t.Errorf("newPrice: %v", body["newPrice"])
+	if body["price"] != "43400" {
+		t.Errorf("price: %v", body["price"])
+	}
+	if _, ok := body["newSize"]; ok {
+		t.Errorf("newSize must NOT be sent (venue expects bare `size`)")
+	}
+	if _, ok := body["newPrice"]; ok {
+		t.Errorf("newPrice must NOT be sent (venue expects bare `price`)")
 	}
 }
 
@@ -260,6 +266,7 @@ func TestContract_Spot_ModifyOrder_RejectsDuplicateClientOid(t *testing.T) {
 		ClientOrderID:    "same",
 		NewClientOrderID: "same",
 		NewQuantity:      decimal.RequireFromString("0.002"),
+		NewPrice:         decimal.RequireFromString("43400"),
 	})
 	if !bitget.IsInvalidRequest(err) {
 		t.Fatalf("ModifyOrder dup-oid: want ErrorKindInvalidRequest, got %v", err)
@@ -419,8 +426,8 @@ func TestContract_Spot_ModifyBatchOrders_NativeSingleRPC(t *testing.T) {
 	})
 
 	var reqs []spottypes.ModifyOrderRequest = []spottypes.ModifyOrderRequest{
-		{Symbol: "BTCUSDT", ClientOrderID: "core-1", NewClientOrderID: "s-aaaa", NewPrice: decimal.RequireFromString("43500")},
-		{Symbol: "BTCUSDT", ClientOrderID: "core-2", NewClientOrderID: "s-bbbb", NewPrice: decimal.RequireFromString("43600")},
+		{Symbol: "BTCUSDT", ClientOrderID: "core-1", NewClientOrderID: "s-aaaa", NewQuantity: decimal.RequireFromString("0.001"), NewPrice: decimal.RequireFromString("43500")},
+		{Symbol: "BTCUSDT", ClientOrderID: "core-2", NewClientOrderID: "s-bbbb", NewQuantity: decimal.RequireFromString("0.002"), NewPrice: decimal.RequireFromString("43600")},
 	}
 	var results []spottypes.BatchOrderResult
 	var err error
@@ -468,8 +475,8 @@ func TestContract_Spot_ModifyBatchOrders_AutoFillsNewClientOid(t *testing.T) {
 	}, func(t *testing.T, r *http.Request) { rec.record(r) })
 
 	var reqs []spottypes.ModifyOrderRequest = []spottypes.ModifyOrderRequest{
-		{Symbol: "BTCUSDT", ClientOrderID: "core-1", NewQuantity: decimal.RequireFromString("0.001")},
-		{Symbol: "BTCUSDT", ClientOrderID: "core-2", NewQuantity: decimal.RequireFromString("0.002")},
+		{Symbol: "BTCUSDT", ClientOrderID: "core-1", NewQuantity: decimal.RequireFromString("0.001"), NewPrice: decimal.RequireFromString("43500")},
+		{Symbol: "BTCUSDT", ClientOrderID: "core-2", NewQuantity: decimal.RequireFromString("0.002"), NewPrice: decimal.RequireFromString("43600")},
 	}
 	var _, err = spotOf(client).Trading().ModifyBatchOrders(context.Background(), reqs)
 	if err != nil {

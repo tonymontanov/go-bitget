@@ -189,6 +189,31 @@ the owner: finish spot, cover it, smoke-test it, and add the missing
 rate-limiter so the spot connector can go live. v2.5 (UTA/V3 alongside
 V2 + remaining sections) starts only after spot is in production.
 
+**Live-validated on `PARTIUSDT` spot (production account).** Bid/Ask
+Frontrun/Smooth/Default Chase + CQB Scale orders place, re-price and
+cancel cleanly; position tracks correctly. Four spot-only wire bugs
+surfaced by live runs and fixed (each had a contract test that had
+pinned the WRONG expectation, so they passed CI while failing the
+venue — all tests now pin the venue-correct shape):
+
+- **REST candle granularity (`code=400171`).** Spot `candles` needs the
+  `1min/1h/1day/...` alphabet, not MIX's `1m/1H/1D`. Added
+  `spotCandleGranularity`; MIX untouched.
+- **`CancelBatchOrders` path (HTTP 404).** Correct spot endpoint is
+  `/api/v2/spot/trade/batch-cancel-order` (was `cancel-batch-orders`).
+- **`ModifyOrder` / `ModifyBatchOrders` wire fields (`400172` / `40019`).**
+  Spot cancel-replace carries the new values under bare `size` / `price`
+  (NOT `newSize` / `newPrice` — that is MIX-only); both mandatory.
+  Validation now rejects a partial modify locally.
+- **Spot position (desk-core).** `GetSymbolPosition` / `WatchPosition`
+  resolve the base-coin balance (available+frozen+locked) instead of a
+  zero stub, so spot positions update via REST poll and WS.
+- **Rate-limiter pool split (desk-core).** `place` and `amend` are
+  independent Bitget pools (10 req/s each); `resolveCategoriesFor` now
+  gates a modify on `amend` only — a Scale place-burst no longer falsely
+  rejects chase modifies. Cancels bypass entirely
+  (`AlwaysAllowCancellation`).
+
 Done in this line (SDK + desk-core, on `main` / `bitget-connector`):
 
 - **SDK examples** — added runnable spot demos mirroring the mix set:
@@ -212,9 +237,12 @@ Done in this line (SDK + desk-core, on `main` / `bitget-connector`):
 - **Audits (no code change)** — error-code coverage (`internal/bgerr`)
   and SPOT↔MIX API parity both confirmed complete.
 
-Remaining for GA: maintainer cuts the `v2.0.0` tag (agent does NOT tag);
-run `examples/spot-smoke` against the live account with real
-`BITGET_SPOT_*` keys (agent cannot run live trades).
+**Published:** the GA-ready line (m1–m6 + the four live fixes above) is
+merged to **`origin/main`** so all SDK consumers get it, not just the
+local checkout. desk-core `go.mod` now references the public SDK module
+(local `replace` removed). Remaining for GA: maintainer cuts the
+`v2.0.0` tag (agent does NOT tag) and bumps desk-core's `require` from
+the current main pseudo-version to the clean `v2.0.0` tag.
 
 ### 📋 Planned
 

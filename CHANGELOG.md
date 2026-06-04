@@ -14,6 +14,22 @@ an error-code audit). Tag is applied by the maintainer.
 
 ### Fixed
 
+- **`spot.Trading.ModifyOrder` / `ModifyBatchOrders` wire field names
+  (code=400172 / 40019).** The cancel-replace bodies serialized the new
+  amount/price under `newSize` / `newPrice`, but Bitget V2 spot
+  cancel-replace-order (and batch-cancel-replace-order) carries the new
+  values under the **bare `size` / `price`** keys — the request is a
+  full re-placement. The venue silently ignored the `new*` keys and
+  rejected every modify with `code=400172 size...empty / price...empty`
+  (single) or `code=40019 size cannot be empty` (batch). Renamed the
+  wire fields to `size` / `price`; both are now mandatory and
+  `validateModifyOrderRequest` rejects a partial modify locally (was
+  "at least one"), so a re-price-only caller gets a clear local error
+  instead of a venue round-trip. MIX is unaffected — its modify
+  endpoint genuinely uses `newSize` / `newPrice`. Production regression
+  observed on `PARTIUSDT`. Contract tests had pinned the wrong keys
+  (`newSize` / `newPrice`); they now assert `size` / `price` and that
+  the `new*` keys are absent.
 - **`spot.Trading.CancelBatchOrders` endpoint path (HTTP 404).** The
   method POSTed to `/api/v2/spot/trade/cancel-batch-orders`, which does
   not exist — Bitget V2 spot batch cancellation lives at

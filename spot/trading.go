@@ -151,13 +151,18 @@ func (t *TradingClient) CreateOrder(ctx context.Context, req spottypes.CreateOrd
 // /api/v2/spot/trade/cancel-replace-order. NewClientOid is REQUIRED
 // (the old clientOid cannot be reused) so the SDK fails fast if the
 // resolved newClientOid collides with the existing one.
+//
+// WIRE NAMES: the venue expects the NEW order's amount/price under the
+// bare `size` / `price` keys (NOT `newSize` / `newPrice`) — the request
+// is a full re-placement. Both are mandatory; Bitget rejects a body
+// that omits either with code=400172 ("size...empty" / "price...empty").
 type modifyOrderBody struct {
 	Symbol       string `json:"symbol"`
 	OrderID      string `json:"orderId,omitempty"`
 	ClientOid    string `json:"clientOid,omitempty"`
 	NewClientOid string `json:"newClientOid"`
-	NewSize      string `json:"newSize,omitempty"`
-	NewPrice     string `json:"newPrice,omitempty"`
+	Size         string `json:"size"`
+	Price        string `json:"price"`
 }
 
 // modifyOrderResp is the JSON `data` returned by cancel-replace-order.
@@ -168,18 +173,20 @@ type modifyOrderResp struct {
 	ClientOid string `json:"clientOid"`
 }
 
-// ModifyOrder amends size and / or price on an open spot order.
+// ModifyOrder re-prices and / or re-sizes an open spot order.
 //
 // WIRE CONTRACT — both fields required: the spot endpoint is a native
-// cancel-replace-order, i.e. a full re-placement of the order. Bitget
-// rejects a request that omits either side with code=400172
-// ("size...spot.order.size.empty" / "price...spot.order.price.empty").
-// Callers that only want to change one dimension (e.g. a pure re-price)
-// MUST still echo the unchanged value of the other. The SDK does not
-// fetch the live order to backfill the missing side — that is an
-// application-layer policy (a REST round-trip) and the desk connector
-// owns it. The SDK only enforces that at least one side is present so a
-// genuine no-op modify fails fast locally.
+// cancel-replace-order, i.e. a full re-placement of the order, and the
+// venue carries the NEW values under the bare `size` / `price` keys
+// (NOT `newSize` / `newPrice`). Bitget rejects a request that omits
+// either side with code=400172 ("size...spot.order.size.empty" /
+// "price...spot.order.price.empty"). Callers that only want to change
+// one dimension (e.g. a pure re-price) MUST still echo the unchanged
+// value of the other. The SDK does not fetch the live order to backfill
+// the missing side — that is an application-layer policy (a REST
+// round-trip) and the desk connector owns it. validateModifyOrderRequest
+// enforces that BOTH NewQuantity and NewPrice are positive, so a partial
+// modify fails fast locally instead of round-tripping a 400172.
 //
 // Identification: either OrderID or ClientOrderID points at the
 // existing order. If both are populated, OrderID wins (Bitget's
@@ -220,12 +227,10 @@ func (t *TradingClient) ModifyOrder(ctx context.Context, req spottypes.ModifyOrd
 		ClientOid:    req.ClientOrderID,
 		NewClientOid: newClientOid,
 	}
-	if !req.NewQuantity.IsZero() {
-		body.NewSize = req.NewQuantity.String()
-	}
-	if !req.NewPrice.IsZero() {
-		body.NewPrice = req.NewPrice.String()
-	}
+	// Both fields are validated > 0 in validateModifyOrderRequest and
+	// the venue mandates both, so emit them unconditionally.
+	body.Size = req.NewQuantity.String()
+	body.Price = req.NewPrice.String()
 
 	var resp rest.Response
 	resp, _, err = t.c.rest().Do(ctx, rest.Options{
@@ -405,8 +410,10 @@ type batchModifyOrderEntry struct {
 	OrderID      string `json:"orderId,omitempty"`
 	ClientOid    string `json:"clientOid,omitempty"`
 	NewClientOid string `json:"newClientOid"`
-	NewSize      string `json:"newSize,omitempty"`
-	NewPrice     string `json:"newPrice,omitempty"`
+	// Bare `size` / `price` (NOT `newSize` / `newPrice`) — same wire
+	// contract as the single cancel-replace-order; both mandatory.
+	Size  string `json:"size"`
+	Price string `json:"price"`
 }
 
 /*
@@ -468,12 +475,10 @@ func (t *TradingClient) ModifyBatchOrders(ctx context.Context, reqs []spottypes.
 			ClientOid:    reqs[i].ClientOrderID,
 			NewClientOid: resolvedNewOid[i],
 		}
-		if !reqs[i].NewQuantity.IsZero() {
-			entry.NewSize = reqs[i].NewQuantity.String()
-		}
-		if !reqs[i].NewPrice.IsZero() {
-			entry.NewPrice = reqs[i].NewPrice.String()
-		}
+		// Both validated > 0 (validateModifyOrderRequest); venue
+		// mandates both, so emit unconditionally.
+		entry.Size = reqs[i].NewQuantity.String()
+		entry.Price = reqs[i].NewPrice.String()
 		body.OrderList[i] = entry
 		seenSymbols[reqs[i].Symbol] = struct{}{}
 	}
@@ -720,8 +725,8 @@ func validateModifyOrderRequest(req spottypes.ModifyOrderRequest) error {
 	if req.OrderID == "" && req.ClientOrderID == "" {
 		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "spot.Trading: either orderId or clientOrderId is required", nil)
 	}
-	if req.NewQuantity.IsZero() && req.NewPrice.IsZero() {
-		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "spot.Trading: at least one of newQuantity or newPrice must be set", nil)
+	if req.NewQuantity.Sign() <= 0 || req.NewPrice.Sign() <= 0 {
+		return bitget.NewError(bitget.ErrorKindInvalidRequest, "", "spot.Trading: both newQuantity and newPrice are required and must be positive (cancel-replace is a full re-placement)", nil)
 	}
 	return nil
 }
