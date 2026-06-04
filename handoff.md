@@ -125,8 +125,13 @@ go-bitget/
   margin/              # v2.5 — Bitget margin (crossed + isolated)
     client.go          — *margin.Client + ClientSettings{Mode} + RegisterMarginFactory (init)
     trading.go         — place / batch-place / cancel / batch-cancel (no amend on margin)
-    account.go / public.go / stream.go — stubs (M3 account/records+currencies, M4 private WS)
-    types/             — margin-only domain types (CreateOrderRequest, OrderInfo, LoanType, STPMode)
+    account.go         — assets / borrow / repay / max-borrowable / max-transfer-out /
+                         orders / fills / paged history records (cursor pagination)
+    public.go          — Currencies (margin-coin reference; mode-agnostic)
+    stream.go          — private WS: WatchOrders (orders-<mode>) / WatchAccount (account-<mode>)
+    types/             — margin-only domain types (CreateOrderRequest, OrderInfo, LoanType,
+                         STPMode, MarginAsset, AccountUpdate, records: Borrow/Repay/Interest/
+                         Liquidation/Financial, Currency, MaxBorrowable, MaxTransferOut)
 
   uta/                 # v2.5 — Unified Trading Account (planned, not started)
   examples/            # runnable demos. MIX: marketdata / place-order /
@@ -208,7 +213,7 @@ Agreed phase order:
 | --- | --- | --- |
 | 0 | branch `v2.5` from `main` | ✅ |
 | 1 | **Futures completeness** — validate COIN-FUTURES / USDC-FUTURES across `mix/` and pin the wire deltas | ✅ (this session) |
-| 2 | `margin/` — cross + isolated (one package parameterised by mode) | 🔧 M1+M2 done (this session) |
+| 2 | `margin/` — cross + isolated (one package parameterised by mode) | ✅ M1–M4 done (this session) |
 | 3 | Copy Trading — futures + spot | 📋 |
 | 4 | `earn/` + `convert/` | 📋 |
 | 5 | `broker/` (Agent) | 📋 |
@@ -238,7 +243,7 @@ No production-code change was required — the routing was already
 correct; the COIN-FUTURES `marginCoin`-omission is the SDK's documented
 assumption, to be confirmed by the owner's live smoke run.
 
-**Phase 2 — in progress (`margin/`, crossed + isolated).** New top-level
+**Phase 2 — done (`margin/`, crossed + isolated).** New top-level
 package `margin/`. Design agreed with the owner: ONE package
 parameterised by **mode** (`crossed` / `isolated`) pinned at
 construction via `margin.ClientSettings{Mode}` (reusing the existing
@@ -270,8 +275,27 @@ Milestone state:
   `quoteSize` market-buy, other omitted); `force` limit-only; optional
   `stpMode`; per-symbol batch + `{successList,failureList}` collation.
   Shared helpers reused from `bgcommon` (no `spot/` reuse, no copy-paste).
-- **M3 (Account/assets + borrow/repay/records + currencies) — next.**
-- **M4 (private WS `account-<mode>` / `orders-<mode>`) — after M3.**
+- **M3 (Account/assets + borrow/repay/records + currencies) — done.**
+  `Account()`: assets, borrow/repay, max-borrowable, max-transfer-out,
+  open/history orders, fills, and paged history records (borrow / repay
+  / interest / liquidation / financial) over `bgcommon.PaginateByCursor`.
+  `Public().Currencies` (mode-agnostic margin-coin reference). Pinned by
+  `margin/account_contract_test.go`: isolated borrow/repay REQUIRE
+  `symbol` (crossed omits); margin order queries REQUIRE `symbol`;
+  `GetMaxBorrowable` parses both crossed (`coin`) and isolated
+  (`baseCoin`/`quoteCoin`) shapes. Advanced endpoints (interest-rate-and-
+  limit, tier-data, risk-rate, flash-repay, liquidation-order) documented
+  and deferred — not on the desk hot path.
+- **M4 (private WS `account-<mode>` / `orders-<mode>`) — done.**
+  `Stream().WatchOrders` / `WatchAccount` on instType=`MARGIN`, lazy
+  login-gated conn mirroring spot's private side. Pinned by
+  `margin/stream_contract_test.go`: mode-suffixed channel names;
+  `instId="default"` (orders) / `coin="default"` (account) with
+  CLIENT-side per-symbol/per-coin filter (`"default"` opts out);
+  field mapping (loanType / baseVolume / fee aggregation / balances);
+  `ErrorKindAuth` without credentials; `FlexString` numeric tolerance.
+- **Example + tests.** `examples/margin` (signed place→list→cancel with
+  `-mode` flag, prices via spot). Full suite green incl. `-race`.
 
 ### 📋 Planned
 

@@ -254,6 +254,14 @@ SPOT (v2.0):
   prints a `PASS` / `FAIL` / `SKIP` summary. `-read-only` skips order
   placement; runs public-only when no credentials are set.
 
+**MARGIN profile (v2.5):**
+
+- [`examples/margin`](./examples/margin) — signed REST: place a post-only
+  LIMIT BUY 5 % below ask, list open orders, then cancel, with a
+  `-mode crossed|isolated` flag. Margin trades spot instruments, so
+  prices come from the spot profile. Reads `BITGET_MARGIN_*` credentials
+  (falling back to the generic `BITGET_*` triple).
+
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 

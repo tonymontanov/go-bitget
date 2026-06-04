@@ -34,7 +34,7 @@ by the maintainer.
   (`USDT-FUTURES` default / `USDC-FUTURES` / `COIN-FUTURES`) so all
   three futures product types can be exercised live without code edits.
 
-### Phase 2 — MARGIN profile (crossed + isolated) — in progress
+### Phase 2 — MARGIN profile (crossed + isolated)
 
 New top-level package `margin/` for Bitget V2 leveraged spot trading.
 Margin trades SPOT instruments with borrowed funds; the **mode**
@@ -64,6 +64,38 @@ the desk connector is untouched.
   `{successList, failureList}` collation. The crossed/isolated path
   segment is asserted by a mode matrix. Shared batch / clientOid / error
   helpers reused from `internal/bgcommon` (no copy-paste from `spot/`).
+- **M3 — Account / assets / borrow-repay / records + public currencies.**
+  `margin.Account()`: `GetAccountAssets`, `Borrow`, `Repay`,
+  `GetMaxBorrowable`, `GetMaxTransferOut`, the order / fill queries
+  (`GetOpenOrders`, `GetOrderHistory`, `GetFills`) and the paged history
+  records (`GetBorrowHistory`, `GetRepayHistory`, `GetInterestHistory`,
+  `GetLiquidationHistory`, `GetFinancialRecords`), all over the shared
+  `bgcommon.PaginateByCursor` (`idLessThan` cursor). `margin.Public()`:
+  `Currencies` (margin-coin reference data) — **mode-agnostic** (no
+  crossed/isolated path segment). Wire invariants pinned by
+  `margin/account_contract_test.go`: isolated `Borrow` / `Repay` REQUIRE
+  `symbol` (crossed omits it); margin order queries REQUIRE `symbol`
+  (unlike spot); `GetMaxBorrowable` parses BOTH the crossed
+  (`coin` + `maxBorrowableAmount`) and isolated (`baseCoin` / `quoteCoin`
+  variants) shapes into one struct. Advanced endpoints
+  (interest-rate-and-limit, tier-data, risk-rate, flash-repay,
+  liquidation-order) are documented and deferred — not on the desk hot
+  path.
+- **M4 — private WebSocket.** `margin.Stream()`: `WatchOrders`
+  (`orders-<mode>`) and `WatchAccount` (`account-<mode>`) on
+  `instType="MARGIN"`, lazy login-gated connection mirroring spot's
+  private side. There is **no public margin WS** — books / tickers come
+  from `spot.Stream`. Wire invariants pinned by
+  `margin/stream_contract_test.go`: channel names carry the
+  crossed/isolated suffix (`orders-crossed` / `account-isolated` / ...);
+  the SDK subscribes with `instId="default"` (orders) / `coin="default"`
+  (account) and filters per-symbol / per-coin CLIENT-side (pass
+  `"default"` to opt out); `loanType` / `baseVolume` / fee-aggregation /
+  balance field mapping; private channels require API credentials
+  (`ErrorKindAuth`); `FlexString` numeric-shape tolerance.
+- **`examples/margin`** — runnable signed demo (place post-only LIMIT BUY
+  → list open orders → cancel) with a `-mode crossed|isolated` flag;
+  price discovery via the spot profile (margin has no market data).
 
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
