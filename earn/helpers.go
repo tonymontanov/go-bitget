@@ -10,9 +10,47 @@ prefix encodes the sub-client path and the meta category is fixed.
 package earn
 
 import (
+	"context"
+
 	bitget "github.com/tonymontanov/go-bitget/v2"
 	"github.com/tonymontanov/go-bitget/v2/internal/rest"
 )
+
+// pageNoMaxPages is the hard ceiling on page-number pagination loops
+// (loan history endpoints). It bounds a runaway server that never returns
+// a short page; at the default page size of 100 this is 100k rows.
+const pageNoMaxPages = 1000
+
+// paginateByPageNo walks a 1-based pageNo / pageSize endpoint until a
+// short (or empty) page or the hard ceiling. Mirrors the copytrading
+// helper; kept profile-local to avoid coupling the two packages.
+func paginateByPageNo[T any](
+	ctx context.Context,
+	pageSize int,
+	fetch func(pageNo, pageSize int) ([]T, error),
+) ([]T, error) {
+	var out []T
+	var page int
+	for page = 1; page <= pageNoMaxPages; page++ {
+		if cerr := ctx.Err(); cerr != nil {
+			return out, cerr
+		}
+		var rows []T
+		var err error
+		rows, err = fetch(page, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		out = append(out, rows...)
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	return out, nil
+}
 
 // errInvalid builds a client-side validation error. `scope` is the
 // sub-client + method (e.g. "Savings.Subscribe").
