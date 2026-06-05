@@ -67,6 +67,9 @@ type Client struct {
 
 	earnOnce sync.Once
 	earnVal  any
+
+	brokerOnce sync.Once
+	brokerVal  any
 }
 
 // NewClient validates cfg, fills defaults, and returns a configured root
@@ -323,6 +326,30 @@ func (c *Client) Earn() any {
 		c.earnVal = earnFactory(c)
 	})
 	return c.earnVal
+}
+
+// brokerFactory is set by broker.init() via RegisterBrokerFactory.
+var brokerFactory func(c *Client) any
+
+// RegisterBrokerFactory wires the broker.Client builder. Idempotent.
+// Available from v2.5.
+func RegisterBrokerFactory(f func(c *Client) any) {
+	if brokerFactory == nil {
+		brokerFactory = f
+	}
+}
+
+// Broker returns the *broker.Client (typed as any). nil when the broker
+// package has not been imported. Available from v2.5.
+func (c *Client) Broker() any {
+	c.brokerOnce.Do(func() {
+		if brokerFactory == nil {
+			c.logger.Warn(`bitget.Client.Broker: broker factory is not registered; available from v2.5`)
+			return
+		}
+		c.brokerVal = brokerFactory(c)
+	})
+	return c.brokerVal
 }
 
 // Compile-time assertion: *Error implements the error interface.
