@@ -73,6 +73,40 @@ func mockBitget(
 	return srv, client
 }
 
+// mockBitgetDynamic is like mockBitget but hands the raw handler to the
+// caller — used for stateful tests (e.g. cursor pagination across pages).
+func mockBitgetDynamic(
+	t *testing.T,
+	handler func(w http.ResponseWriter, r *http.Request, body []byte),
+) (*httptest.Server, *bitget.Client) {
+	t.Helper()
+
+	var srv *httptest.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw []byte
+		if r.Body != nil {
+			raw, _ = io.ReadAll(r.Body)
+		}
+		handler(w, r, raw)
+	}))
+	t.Cleanup(srv.Close)
+
+	var cfg bitget.Config = bitget.DefaultConfig()
+	cfg.REST.BaseURL = srv.URL
+	cfg.APIKey = "k"
+	cfg.SecretKey = "s"
+	cfg.Passphrase = "p"
+	cfg.REST.RequestTimeout = 3 * time.Second
+
+	var client *bitget.Client
+	var err error
+	client, err = bitget.NewClient(cfg)
+	if err != nil {
+		t.Fatalf("bitget.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return srv, client
+}
+
 // commonClient resolves the common.Client off a wired parent.
 func commonClient(t *testing.T, client *bitget.Client) *Client {
 	t.Helper()
