@@ -20,7 +20,6 @@ package broker
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 	"strconv"
 
@@ -165,7 +164,7 @@ type SubAccountsQuery struct {
 
 type subAccountListEnvelope struct {
 	HasNextPage bool            `json:"hasNextPage"`
-	IDLessThan  json.Number     `json:"idLessThan"`
+	IDLessThan  int64           `json:"idLessThan"`
 	SubList     []subAccountRow `json:"subList"`
 }
 
@@ -217,13 +216,10 @@ func (s *SubAccountClient) List(ctx context.Context, q SubAccountsQuery) ([]brok
 		for i = 0; i < len(env.SubList); i++ {
 			out = append(out, env.SubList[i].toDomain())
 		}
-		if !env.HasNextPage || len(env.SubList) == 0 {
+		if !env.HasNextPage || len(env.SubList) == 0 || env.IDLessThan <= 0 {
 			break
 		}
-		idLessThan = env.IDLessThan.String()
-		if idLessThan == "" || idLessThan == "0" {
-			break
-		}
+		idLessThan = strconv.FormatInt(env.IDLessThan, 10)
 	}
 	return out, nil
 }

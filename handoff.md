@@ -216,7 +216,7 @@ Agreed phase order:
 | 2 | `margin/` — cross + isolated (one package parameterised by mode) | ✅ M1–M4 done (this session) |
 | 3 | Copy Trading — futures + spot | ✅ M1–M5 done (this session) |
 | 4 | `earn/` + `convert/` | ✅ done (this session) |
-| 5 | `broker/` (Agent) | 📋 |
+| 5 | `broker/` (Agent) | ✅ done (this session) |
 | 6 | Common / public utilities round-out | 📋 |
 | 7 | `uta/` — V3 Unified Trading Account (hedge mode, demo/testnet hosts) | 📋 |
 
@@ -385,6 +385,48 @@ Milestone state:
   elite products + held positions; loan currency table + ongoing orders;
   convert currency list + a sample RFQ quote — no funds moved). Full
   suite green (`go test -race ./...`).
+
+**Phase 5 — done (`broker/`, broker + agent).** New top-level package
+`broker/` for the two programs that share the broker namespace: the
+institutional **broker** (managed sub-accounts + commission reporting) and
+the **agent** (affiliate / referral) program. **REST-only**, account-level,
+**not** product-type scoped (except `subaccount-future-assets`); no WS.
+Lazy `bitget.Client.Broker()` factory; five sub-clients
+(`SubAccounts`/`APIKeys`/`Stats`/`Agent`/`CopyBroker`), 34 endpoints. All
+signed; most require an approved broker/agent account (a non-eligible key
+gets a 4xx). Wire shapes from the V2 docs + the changelog legacy-endpoint
+mapping + the tiagosiebler reference (request/response types). Owner
+validates live.
+
+Milestone state:
+
+- **P5-M1 (scaffold + Sub-account mgmt, 14) — done.** `account/info`,
+  `create-subaccount`, `subaccount-list` (hasNextPage/idLessThan paged),
+  `modify-subaccount`, modify/get `subaccount-email`, spot/future assets
+  (future-assets is the one productType-scoped call), `subaccount-address`,
+  `subaccount-withdrawal`, `set-subaccount-autotransfer`, plus the
+  ND-broker `subaccount-deposit` / `subaccount-withdrawal` /
+  `all-sub-deposit-withdrawal` record feeds (idLessThan/endId cursor).
+  Guards on the mutating calls (incl. `on_chain` → `chain` required).
+- **P5-M2 (API keys, 3) — done.** `create-subaccount-apikey` (returns
+  `secretKey` once), `subaccount-apikey-list`, `modify-subaccount-apikey`.
+  ipList/permList sent as JSON arrays.
+- **P5-M3 (broker reporting, 6) — done.** `subaccounts`/`commissions`/
+  `trade-volume` (pageNo/pageSize, fully walked), `total-commission`
+  (daily slice, nested spot/futures breakdown), `order-commission`
+  (idLessThan/endId cursor), `rebate-info` (per-uid).
+- **P5-M4 (agent reporting, 8) — done.** GET cursor reads
+  (`customer-commissions`, `sub-customer-list` minId cursor,
+  `customer-kyc-result`, `agent-commission`) + **POST** pageNo/pageSize
+  reads (`customer-trade-volume`, `customer-list`, `customer-deposit`,
+  `customer-asset`). Maps the venue's misspelled `volumn` → `Volume`.
+- **P5-M5 (copy mix-broker + docs) — done.** `query-traders`,
+  `query-history-traces`, `query-current-traces` (deferred from Phase 3;
+  pageNo/pageSize; current-traces ignores the time window). **Open item:**
+  upstream types these as `any`; the row shapes follow the documented copy
+  trader / order-trace schema and decode leniently — confirm field names
+  on the live smoke run. `examples/broker`: read-only demo across all four
+  groups. Full suite green (`go test -race ./...`).
 
 ### 📋 Planned
 

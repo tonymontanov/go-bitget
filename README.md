@@ -282,6 +282,17 @@ SPOT (v2.0):
   executed). Reads `BITGET_EARN_*` credentials (falling back to the
   generic `BITGET_*` triple).
 
+**BROKER / AGENT profile (v2.5):**
+
+- [`examples/broker`](./examples/broker) — **read-only** signed REST: the
+  broker sub-account quota + list, the institutional broker reporting
+  (total commission, subaccounts), the agent / affiliate reporting
+  (sub-customers, customer commissions, KYC) and the copy-trading broker
+  trader list (no sub-account / withdrawal / API-key state is changed; a
+  non-broker / non-agent key gets an expected eligibility note). Reads
+  `BITGET_BROKER_*` credentials (falling back to the generic `BITGET_*`
+  triple).
+
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 

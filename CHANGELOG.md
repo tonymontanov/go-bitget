@@ -213,6 +213,59 @@ the established `Mix` / `Spot` / `Margin` / `CopyTrading` pattern.
   and the convert currency list plus a sample RFQ quote (no swap is
   executed).
 
+### Phase 5 — BROKER / AGENT profile
+
+New top-level package `broker/` covering the two programs that share the
+Bitget broker namespace: the institutional **broker** (managed
+sub-accounts + commission reporting) and the **agent** (affiliate /
+referral) program. REST-only, account-level, **not** product-type scoped
+(except `subaccount-future-assets`); no WebSocket. Lazy
+`bitget.Client.Broker()` factory; five category sub-clients
+(`SubAccounts` / `APIKeys` / `Stats` / `Agent` / `CopyBroker`), 34
+endpoints total. All calls signed; most require an approved broker / agent
+account (a non-eligible key gets a 4xx).
+
+- **SubAccounts** (14): `account/info`, `create-subaccount`,
+  `subaccount-list` (`hasNextPage`/`idLessThan` paged), `modify-subaccount`,
+  `modify`/`get` `subaccount-email`, `subaccount-spot-assets`,
+  `subaccount-future-assets` (the one productType-scoped call),
+  `subaccount-address`, `subaccount-withdrawal`,
+  `set-subaccount-autotransfer`, plus the ND-broker `subaccount-deposit` /
+  `subaccount-withdrawal` / `all-sub-deposit-withdrawal` record feeds
+  (`idLessThan`/`endId` cursor).
+- **APIKeys** (3): `create-subaccount-apikey` (returns the `secretKey`
+  once), `subaccount-apikey-list`, `modify-subaccount-apikey`.
+- **Stats** — institutional broker reporting (6): `subaccounts` /
+  `commissions` / `trade-volume` (pageNo/pageSize, fully walked),
+  `total-commission` (daily slice with nested spot/futures breakdown),
+  `order-commission` (`idLessThan`/`endId` cursor), `rebate-info` (per-uid).
+- **Agent** — affiliate reporting (8): `customer-commissions`,
+  `sub-customer-list` (`minId` cursor), `customer-kyc-result`,
+  `agent-commission` are GET cursor reads; `customer-trade-volume`,
+  `customer-list`, `customer-deposit`, `customer-asset` are **POST**
+  pageNo/pageSize reads. Maps the venue's misspelled `volumn` field to
+  `Volume`.
+- **CopyBroker** — copy-trading broker reads (3):
+  `query-traders`, `query-history-traces`, `query-current-traces`
+  (deferred from Phase 3; pageNo/pageSize). Upstream references type these
+  as `any`; the row shapes follow the documented copy trader / order-trace
+  schema and decode leniently — to be confirmed by the live smoke run.
+  `query-current-traces` ignores the time window.
+
+  Create / Withdraw / SetAutoTransfer / APIKeys.Create|Modify move funds or
+  mint credentials — the SDK validates the obvious client-side
+  preconditions only (incl. `on_chain` → `chain` required). Request params
+  and wire shapes were verified against the V2 docs, the changelog
+  legacy-endpoint mapping and the tiagosiebler reference client. Contract
+  tests pin the wire shapes, the list / cursor / page-number pagination
+  (incl. the POST page reads and the `minId` cursor), the no-`productType`
+  invariant on spot-assets, the secret-once API-key semantics and the
+  required-field guards.
+- **`examples/broker`** — runnable, **read-only** demo: sub-account quota
+  + list, broker reporting (total commission, subaccounts), agent
+  reporting (sub-customers, customer commissions, KYC) and the
+  copy-trading broker trader list (no account state is changed).
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS
