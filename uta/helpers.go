@@ -10,6 +10,8 @@ profile-local because the error-message prefix encodes the sub-client path.
 package uta
 
 import (
+	"context"
+
 	"github.com/shopspring/decimal"
 
 	bitget "github.com/tonymontanov/go-bitget/v2"
@@ -47,6 +49,24 @@ func flowMeta(cat bitget.RateLimitCategory, orderCount int, symbols ...string) r
 		OrderCount: orderCount,
 		Symbols:    symbols,
 	}
+}
+
+// callSigned runs a signed REST call and (optionally) decodes the envelope
+// data into dst. Shared by every private sub-client.
+func (c *Client) callSigned(ctx context.Context, opts rest.Options, scope string, dst any) error {
+	opts.Signed = true
+	var resp rest.Response
+	var err error
+	resp, _, err = c.rest().Do(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if dst != nil {
+		if err = resp.UnmarshalData(dst); err != nil {
+			return errParse(scope, err)
+		}
+	}
+	return nil
 }
 
 // dec parses raw into *dst, wrapping a failure as a scoped parse error.

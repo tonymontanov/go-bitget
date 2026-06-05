@@ -45,6 +45,16 @@ const (
 	Interval1D  Interval = "1D"
 )
 
+// HoldMode — futures position mode (Account.SetHoldMode).
+type HoldMode string
+
+const (
+	// HoldModeOneWay — single net position per symbol (no posSide).
+	HoldModeOneWay HoldMode = "one_way_mode"
+	// HoldModeHedge — separate long / short positions (orders carry posSide).
+	HoldModeHedge HoldMode = "hedge_mode"
+)
+
 // CandleType — which price series a candle query returns.
 type CandleType string
 
