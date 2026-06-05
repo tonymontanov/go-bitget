@@ -302,6 +302,17 @@ SPOT (v2.0):
   caller's virtual sub-accounts (no virtual sub-account / API-key state is
   changed). Reads the generic `BITGET_*` triple.
 
+**UTA — V3 Unified Trading Account (v2.5):**
+
+- [`examples/uta`](./examples/uta) — the **unsigned** market section (V3
+  server time, instruments, ticker, book, candles, funding, position
+  tiers) runs with no credentials; the **read-only** signed sections show
+  the unified account assets / settings / fee-rate, open orders, recent
+  fills, current positions and open strategy (plan) orders. Never places /
+  cancels orders or changes leverage / hold mode. Set `BITGET_DEMO=1`
+  (with a Demo API Key) to route through paper trading. Reads the generic
+  `BITGET_*` triple.
+
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 

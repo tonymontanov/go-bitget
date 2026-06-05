@@ -133,7 +133,7 @@ go-bitget/
                          STPMode, MarginAsset, AccountUpdate, records: Borrow/Repay/Interest/
                          Liquidation/Financial, Currency, MaxBorrowable, MaxTransferOut)
 
-  uta/                 # v2.5 — Unified Trading Account (planned, not started)
+  uta/                 # v2.5 — V3 Unified Trading Account (core done: Public/Account/Trade/Position/Strategy)
   examples/            # runnable demos. MIX: marketdata / place-order /
                        #   private-stream. SPOT: spot-marketdata /
                        #   spot-place-order / spot-private-stream /
@@ -218,7 +218,7 @@ Agreed phase order:
 | 4 | `earn/` + `convert/` | ✅ done (this session) |
 | 5 | `broker/` (Agent) | ✅ done (this session) |
 | 6 | Common / public utilities round-out | ✅ done (this session) |
-| 7 | `uta/` — V3 Unified Trading Account (hedge mode, demo/testnet hosts) | 📋 |
+| 7 | `uta/` — V3 Unified Trading Account (core: Public+Account+Trade+Position+Strategy; hedge mode, demo header) | ✅ done (this session) |
 
 **Phase 1 — done (futures completeness).** Audit confirmed every `mix/`
 REST/WS path already routes `productType` / `marginCoin` through the
@@ -460,13 +460,56 @@ Milestone state:
   trade-rate, tax, P2P, virtual sub-accounts). CHANGELOG/README/handoff
   updated. Full suite green (`go test -race ./...`).
 
+**Phase 7 — done (`uta/`, V3 Unified Trading Account — CORE).** New
+top-level package `uta/` for the V3 UTA. V3 keys on a per-call `category`
+(`SPOT`/`MARGIN`/`USDT|COIN|USDC-FUTURES`), not product-pinned clients;
+signing reuses the V2 `ACCESS-*` scheme unchanged. Lazy
+`bitget.Client.UTA()` factory; five sub-clients
+(`Public`/`Account`/`Trade`/`Position`/`Strategy`), ~55 endpoints. REST
+only. Wire shapes from the V3 docs + the tiagosiebler `rest-client-v3`.
+Owner validates live.
+
+- **Demo.** New `bitget.Config.Demo` → REST transport adds `paptrading: 1`
+  on every request (production host + a Demo API Key). WS demo URL consts
+  (`wspap...`) reserved, not wired.
+- **P7-M1 (scaffold + Public core, 7) — done.** UNSIGNED: server-time,
+  instruments, tickers, orderbook, candles/history-candles, public fills.
+- **P7-M2 (Public extras, 14) — done.** fee-group, score-weights,
+  proof-of-reserves, open-interest, funding (current/history), risk-reserve
+  (+hour +all), discount-rate, margin-loans, position-tier, oi-limit,
+  index-components.
+- **P7-M3 (Account core, 12) — done.** assets, funding-assets, info,
+  settings, set-leverage, set-hold-mode (one_way/hedge), fee-rate,
+  max-transferable, financial-records (cursor), open-interest-limit,
+  switch + switch-status. Shared `Client.callSigned` helper.
+- **P7-M4 (Trade, 13) — done.** place/modify/cancel (+batch×3),
+  cancel-symbol, close-positions, countdown-cancel-all, order-info,
+  unfilled/history, fills. **Batch body = top-level JSON array**; responses
+  decoded leniently (bare array OR `{list|successList|failureList}`).
+- **P7-M5 (Position, 4) — done.** current/history position, max-open-
+  available (POST), adlRank. `holdMode`/`posSide` surfaced.
+- **P7-M6 (Strategy/plan orders, 5) — done.** place/modify/cancel +
+  unfilled/history; TP/SL (full/partial) and trigger orders.
+- **P7-M7 (example + docs) — done.** `examples/uta` (read-only; `BITGET_DEMO=1`
+  for paper). CHANGELOG/README/handoff updated. Full suite green.
+
+**Open items for live confirmation (Phase 7):** (1) the V3 batch
+place/modify response shape — decoded leniently, confirm whether it is a
+bare array or `{successList,failureList}` on a real key; (2) the exact
+`paptrading` casing accepted by the venue (sent lowercase, docs show both);
+(3) `account/info` (`GetInfo`) field set; (4) candle turnover column
+presence (index 6, decoded if present).
+
 ### 📋 Planned
 
-- **`v2.5` phase 7** — see the table above. Each phase: two-layer
-  (lift shared into `bgcommon`), contract tests at parity, then a
-  review pause. `uta/` is additive and must not change V2 behaviour;
-  `WatchPositions` stays mix-only by venue contract until UTA
-  reintroduces unified positions.
+- **`v2.5` follow-ups** — the V3 re-issues not in the core: wallet /
+  transfer / deposit / withdraw, V3 user sub-accounts, V3 tax, V3 broker,
+  ins-loan, V3 crypto-loan, V3 earn-elite, V3 copy-futures — plus the V3
+  **WebSocket** (public/private streams + WS trading, incl. the `wspap`
+  demo hosts). Each: two-layer (lift shared into `bgcommon`), contract
+  tests at parity, then a review pause. `uta/` is additive and must not
+  change V2 behaviour; `WatchPositions` stays mix-only by venue contract
+  until UTA reintroduces unified positions over WS.
 
 ---
 

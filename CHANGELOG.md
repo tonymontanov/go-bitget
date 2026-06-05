@@ -266,6 +266,60 @@ account (a non-eligible key gets a 4xx).
   reporting (sub-customers, customer commissions, KYC) and the
   copy-trading broker trader list (no account state is changed).
 
+### Phase 7 — UTA: V3 Unified Trading Account (core)
+
+New top-level package `uta/` for the Bitget **V3 Unified Trading Account** —
+the next-generation API that trades spot and derivatives from one
+cross-margined account. Unlike the V2 profiles, V3 is organised around a
+per-call `category` (`SPOT` / `MARGIN` / `USDT-FUTURES` / `COIN-FUTURES` /
+`USDC-FUTURES`) rather than product-pinned clients. The lazy entry point
+`bitget.Client.UTA()` resolves once the package is imported; signing reuses
+the V2 `ACCESS-*` scheme unchanged. This phase ships the **core** (REST):
+Public + Account + Trade + Position + Strategy. The V3 re-issues of
+wallet / sub-accounts / tax / broker / loan / earn-elite / copy and the V3
+WebSocket are separate follow-ups.
+
+- **Demo plumbing.** New `bitget.Config.Demo` toggle: when set, the REST
+  transport adds `paptrading: 1` to every request so Bitget routes it to
+  the demo (paper) trading environment (production host + a Demo API Key).
+  Reserved WS demo URL constants (`wspap.bitget.com/v3/ws/...`) added for
+  the future WS sub-phase.
+- **Public core (P7-M1, unsigned, 7):** `GetServerTime` (`public/time`),
+  `GetInstruments`, `GetTickers`, `GetOrderBook`, `GetCandles`,
+  `GetHistoryCandles`, `GetPublicFills` (`market/*`). Category guards;
+  array-of-arrays candle decode; decimal numerics, int32 precisions, int64
+  ms times.
+- **Public extras (P7-M2, unsigned, 14):** fee-group, score-weights,
+  proof-of-reserves, open-interest, current/history funding rate,
+  risk-reserve (+ hour + all), discount-rate, margin-loans, position-tier,
+  oi-limit, index-components.
+- **Account core (P7-M3, signed, 12):** assets, funding-assets, info,
+  settings, `SetLeverage`, `SetHoldMode` (one-way / hedge), fee-rate,
+  max-transferable, financial-records (page + cursor), open-interest-limit,
+  `DowngradeToClassic` + switch-status. Added the shared `Client.callSigned`
+  helper and `HoldMode` enum.
+- **Trade (P7-M4, signed, 13):** place / modify / cancel (single + batch),
+  cancel-symbol-order, close-positions, countdown-cancel-all, order-info,
+  unfilled / history orders, fills. Batch endpoints take a **top-level JSON
+  array** body; responses decode leniently from a bare array or a
+  `{list|successList|failureList}` envelope. Unified `Order` view + `Fill`
+  with fee detail; hedge-mode `posSide` flows through.
+- **Position (P7-M5, signed, 4):** current-position, history-position
+  (page + cursor), max-open-available (POST probe), adlRank. Positions
+  surface `holdMode` / `posSide` for one-way and hedge accounts.
+- **Strategy / plan orders (P7-M6, signed, futures-only, 5):** place /
+  modify / cancel + unfilled / history strategy orders, covering both
+  TP/SL (full/partial) and trigger plan orders.
+- **`examples/uta`** — runnable, **read-only** demo: the unsigned market
+  section runs with no credentials; signed sections show account assets /
+  settings / fee-rate, open orders, fills, positions and open plan orders.
+  `BITGET_DEMO=1` routes through paper trading. No order / leverage /
+  position state is changed.
+- Contract tests across every sub-client pin the signed vs unsigned
+  invariants, the demo header, POST / array body shaping, both batch
+  response shapes, cursor pass-through and all decoding. Build / vet / race
+  green across the repo.
+
 ### Phase 6 — COMMON / PUBLIC utilities round-out
 
 New top-level package `common/` covering the market-agnostic,
