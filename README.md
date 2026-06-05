@@ -293,6 +293,15 @@ SPOT (v2.0):
   `BITGET_BROKER_*` credentials (falling back to the generic `BITGET_*`
   triple).
 
+**COMMON / PUBLIC utilities (v2.5):**
+
+- [`examples/common`](./examples/common) — the **unsigned** public section
+  (server time + announcements) runs with no credentials; the **read-only**
+  signed sections show the account-wide assets / trade-rate, a recent slice
+  of tax records, the P2P merchant profile + merchant list, and the
+  caller's virtual sub-accounts (no virtual sub-account / API-key state is
+  changed). Reads the generic `BITGET_*` triple.
+
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 

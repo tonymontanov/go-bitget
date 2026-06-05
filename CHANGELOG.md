@@ -266,6 +266,55 @@ account (a non-eligible key gets a 4xx).
   reporting (sub-customers, customer commissions, KYC) and the
   copy-trading broker trader list (no account state is changed).
 
+### Phase 6 — COMMON / PUBLIC utilities round-out
+
+New top-level package `common/` covering the market-agnostic,
+account-level surface that does not belong to a single trading profile.
+REST-only, **not** product-type scoped, no WebSocket. Lazy
+`bitget.Client.Common()` factory; five category sub-clients
+(`Public` / `Account` / `Tax` / `P2P` / `Users`), 21 endpoints total.
+
+- **Public** — UNSIGNED utility reads (2): `GetServerTime`
+  (`public/time` → epoch-ms `int64`) and `GetAnnouncements`
+  (`public/annoucements`; `language` required). Neither sends an
+  `ACCESS-SIGN` header — they work without credentials.
+- **Account** — account-wide assets + fee rate (4): `GetFundingAssets`
+  (`account/funding-assets`), `GetBotAssets` (`account/bot-assets`),
+  `GetAllAccountBalance` (`account/all-account-balance`) and `GetTradeRate`
+  (`common/trade-rate`; `symbol`+`businessType` guards).
+- **Tax** — tax transaction records (4): `GetSpotRecords` /
+  `GetFuturesRecords` / `GetMarginRecords` / `GetP2PRecords`
+  (`tax/{spot,future,margin,p2p}-record`). Each requires a
+  `[startTime,endTime]` window and returns a flat array stitched by the
+  `idLessThan` cursor (next = the last row's id).
+- **P2P** — merchant reads (4): `GetMerchants` (`p2p/merchantList`),
+  `GetMerchantInfo` (`p2p/merchantInfo`), `GetOrders` (`p2p/orderList`;
+  `startTime`+`advNo`+`language` required) and `GetAdvertisements`
+  (`p2p/advList`; `startTime`+`status`+`side`+`coin`+`fiat` required). The
+  list reads walk the `idLessThan`/`min*Id` cursor; nested order
+  `paymentInfo` and ad `userLimit` / `paymentMethods` / `certified` blocks
+  decode into typed structs.
+- **Users** — MAIN-account virtual sub-account + API-key management (7),
+  distinct from the broker sub-accounts: `CreateSubAccounts`,
+  `ModifySubAccount`, `BatchCreateSubAccountAndAPIKey`, `GetSubAccounts`
+  (`idLessThan`/`endId` cursor), `CreateAPIKey`, `ModifyAPIKey`,
+  `GetAPIKeys` (`user/...`). Write endpoints mint/rebind real credentials
+  and change account state — the SDK validates the obvious client-side
+  guards; `SecretKey` is surfaced only at create/modify time. The
+  create-subaccount response accepts the venue's `subaAccount*` spelling
+  defensively.
+
+  Request params and wire shapes were verified against the V2 docs and the
+  tiagosiebler reference client. Contract tests pin the unsigned invariant
+  on the public reads, the cursor stitching (flat tax arrays + enveloped
+  P2P / virtual-subaccount lists), the nested P2P decoding, the POST body
+  shaping and every required-field guard.
+- **`examples/common`** — runnable demo: the unsigned public section
+  (server time + announcements) runs with no credentials; the read-only
+  signed sections show account-wide assets / trade-rate, recent tax
+  records, the P2P merchant profile + list, and the caller's virtual
+  sub-accounts (no virtual sub-account / API-key state is changed).
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS

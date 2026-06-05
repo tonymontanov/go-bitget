@@ -217,7 +217,7 @@ Agreed phase order:
 | 3 | Copy Trading — futures + spot | ✅ M1–M5 done (this session) |
 | 4 | `earn/` + `convert/` | ✅ done (this session) |
 | 5 | `broker/` (Agent) | ✅ done (this session) |
-| 6 | Common / public utilities round-out | 📋 |
+| 6 | Common / public utilities round-out | ✅ done (this session) |
 | 7 | `uta/` — V3 Unified Trading Account (hedge mode, demo/testnet hosts) | 📋 |
 
 **Phase 1 — done (futures completeness).** Audit confirmed every `mix/`
@@ -428,9 +428,41 @@ Milestone state:
   on the live smoke run. `examples/broker`: read-only demo across all four
   groups. Full suite green (`go test -race ./...`).
 
+**Phase 6 — done (`common/`, public utilities round-out).** New top-level
+package `common/` for the market-agnostic, account-level surface not tied
+to a single trading profile. **REST-only**, **not** product-type scoped,
+no WS. Lazy `bitget.Client.Common()` factory; five sub-clients
+(`Public`/`Account`/`Tax`/`P2P`/`Users`), 21 endpoints. Wire shapes from
+the V2 docs + the tiagosiebler reference. Owner validates live.
+
+Milestone state:
+
+- **P6-M1 (scaffold + Public + Account, 6) — done.** `Public` is UNSIGNED
+  (no `ACCESS-SIGN`): `GetServerTime` (`public/time`), `GetAnnouncements`
+  (`public/annoucements`, language required). `Account` (signed):
+  `GetFundingAssets`, `GetBotAssets`, `GetAllAccountBalance`, `GetTradeRate`
+  (`common/trade-rate`, symbol+businessType guards).
+- **P6-M2 (Tax + P2P, 8) — done.** Tax (4): spot/future/margin/p2p records,
+  each window-required, flat array stitched by `idLessThan` cursor (next =
+  last row id) via `bgcommon.PaginateByCursor`. P2P (4): merchantList /
+  merchantInfo / orderList / advList; list reads walk the
+  `idLessThan`/`min*Id` cursor; nested order paymentInfo + ad
+  userLimit/paymentMethods/certified decode into typed structs.
+- **P6-M3 (virtual sub-accounts + API keys, 7) — done.** MAIN-account user
+  management (`user/...`), distinct from broker sub-accounts.
+  Create/Modify subaccount, BatchCreateSubAccountAndAPIKey, GetSubAccounts
+  (`idLessThan`/`endId` cursor), Create/Modify/Get API keys. Writes mint
+  real credentials → client-side guards; `SecretKey` surfaced once. **Open
+  item:** the create-subaccount response uses the venue's `subaAccount*`
+  spelling — decoded defensively (both spellings); confirm on live run.
+- **P6-M4 (example + docs) — done.** `examples/common`: unsigned public
+  section runs with no creds; read-only signed sections (account assets /
+  trade-rate, tax, P2P, virtual sub-accounts). CHANGELOG/README/handoff
+  updated. Full suite green (`go test -race ./...`).
+
 ### 📋 Planned
 
-- **`v2.5` phases 5–7** — see the table above. Each phase: two-layer
+- **`v2.5` phase 7** — see the table above. Each phase: two-layer
   (lift shared into `bgcommon`), contract tests at parity, then a
   review pause. `uta/` is additive and must not change V2 behaviour;
   `WatchPositions` stays mix-only by venue contract until UTA
