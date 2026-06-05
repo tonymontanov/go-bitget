@@ -77,3 +77,51 @@ func mockBitget(
 func copyClient(parent *bitget.Client) *Client {
 	return NewClientWithProductType(parent, roottypes.ProductTypeUSDTFutures)
 }
+
+// mockBitgetDynamic stands up a server whose JSON body is computed per
+// request by `body` (used for page-number pagination tests where the
+// response depends on the query string). Returns a wired bitget.Client.
+func mockBitgetDynamic(
+	t *testing.T,
+	body func(t *testing.T, r *http.Request) string,
+) (*httptest.Server, *bitget.Client) {
+	t.Helper()
+
+	var srv *httptest.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-RateLimit-Limit", "20")
+		w.Header().Set("X-RateLimit-Remaining", "19")
+		_, _ = io.WriteString(w, body(t, r))
+	}))
+	t.Cleanup(srv.Close)
+
+	var cfg bitget.Config = bitget.DefaultConfig()
+	cfg.REST.BaseURL = srv.URL
+	cfg.APIKey = "k"
+	cfg.SecretKey = "s"
+	cfg.Passphrase = "p"
+	cfg.REST.RequestTimeout = 3 * time.Second
+
+	var client *bitget.Client
+	var err error
+	client, err = bitget.NewClient(cfg)
+	if err != nil {
+		t.Fatalf("bitget.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return srv, client
+}
+
+// joinComma joins rows with a comma (small local helper for building
+// multi-row JSON fixtures).
+func joinComma(rows []string) string {
+	var out string
+	var i int
+	for i = 0; i < len(rows); i++ {
+		if i > 0 {
+			out += ","
+		}
+		out += rows[i]
+	}
+	return out
+}

@@ -124,3 +124,55 @@ type TraderModifyTPSLRequest struct {
 	StopSurplusPrice string
 	StopLossPrice    string
 }
+
+// --- M3b: config ------------------------------------------------------
+
+// TraderSymbolConfig — one row of GET mix-trader/config-query-symbols:
+// the copy-trade configuration for a symbol the trader can broadcast.
+// OpenTrader is "YES"/"NO" (whether copy trading is active for it).
+// Ratios are percentages (120 means 120%).
+type TraderSymbolConfig struct {
+	Symbol           string
+	OpenTrader       string
+	MinOpenCount     decimal.Decimal
+	MaxLeverage      decimal.Decimal
+	StopSurplusRatio decimal.Decimal
+	StopLossRatio    decimal.Decimal
+}
+
+// SymbolSettingChange — one entry sent to
+// POST mix-trader/config-setting-symbols. SettingType is "ADD" /
+// "DELETE" / "UPDATE". Ratios are strings to preserve the
+// empty / "0" / >0 semantics on UPDATE. ProductType is taken from the
+// client (pinned).
+//
+// Required: Symbol, SettingType.
+type SymbolSettingChange struct {
+	Symbol           string
+	SettingType      string
+	StopSurplusRatio string
+	StopLossRatio    string
+}
+
+// GlobalSettingsRequest — input to POST mix-trader/config-settings-base.
+// At least one field must be set. All are "YES"/"NO".
+//
+//	Enable:          activate elite trading
+//	ShowTotalEquity: publicly show total assets (USDT)
+//	ShowTpsl:        publicly show order TP/SL prices
+type GlobalSettingsRequest struct {
+	Enable          string
+	ShowTotalEquity string
+	ShowTpsl        string
+}
+
+// TraderFollower — one row of GET mix-trader/config-query-followers.
+// IsRemove is "YES"/"NO" (whether this follower may be removed).
+type TraderFollower struct {
+	FollowerUID     string
+	FollowerName    string
+	FollowerHeadPic string
+	IsRemove        string
+	AccountEquity   decimal.Decimal
+	FollowerTimeMs  int64
+}
