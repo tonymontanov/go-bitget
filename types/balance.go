@@ -42,14 +42,14 @@ type Balance struct {
 
 // CoinBalance — wallet state for a single asset within Balance.
 type CoinBalance struct {
-	Coin             string
-	Equity           decimal.Decimal
-	Available        decimal.Decimal
-	Frozen           decimal.Decimal
-	Locked           decimal.Decimal
-	UsdValue         decimal.Decimal
-	UnrealizedPnL    decimal.Decimal
-	CumRealizedPnL   decimal.Decimal
-	UsdtEquity       decimal.Decimal
-	BtcEquity        decimal.Decimal
+	Coin           string
+	Equity         decimal.Decimal
+	Available      decimal.Decimal
+	Frozen         decimal.Decimal
+	Locked         decimal.Decimal
+	UsdValue       decimal.Decimal
+	UnrealizedPnL  decimal.Decimal
+	CumRealizedPnL decimal.Decimal
+	UsdtEquity     decimal.Decimal
+	BtcEquity      decimal.Decimal
 }

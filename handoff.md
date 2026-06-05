@@ -470,7 +470,9 @@ only. Wire shapes from the V3 docs + the tiagosiebler `rest-client-v3`.
 Owner validates live.
 
 - **Demo.** New `bitget.Config.Demo` → REST transport adds `paptrading: 1`
-  on every request (production host + a Demo API Key). WS demo URL consts
+  **only on signed `/api/v3/*` (UTA) requests** (production host + a Demo
+  API Key). NOTE: corrected in Phase 8 — the header was originally sent on
+  every request, which 40404s unsigned/common endpoints. WS demo URL consts
   (`wspap...`) reserved, not wired.
 - **P7-M1 (scaffold + Public core, 7) — done.** UNSIGNED: server-time,
   instruments, tickers, orderbook, candles/history-candles, public fills.
@@ -493,12 +495,23 @@ Owner validates live.
 - **P7-M7 (example + docs) — done.** `examples/uta` (read-only; `BITGET_DEMO=1`
   for paper). CHANGELOG/README/handoff updated. Full suite green.
 
-**Open items for live confirmation (Phase 7):** (1) the V3 batch
-place/modify response shape — decoded leniently, confirm whether it is a
-bare array or `{successList,failureList}` on a real key; (2) the exact
-`paptrading` casing accepted by the venue (sent lowercase, docs show both);
-(3) `account/info` (`GetInfo`) field set; (4) candle turnover column
-presence (index 6, decoded if present).
+**Phase 8 — Live/DEMO integration testing — done (in progress for signed).**
+Build-tagged suite under `integration/` (`go test -tags integration
+./integration/...`); demo forced on, unsigned tests run credential-free,
+signed tests skip without creds, paper writes behind `BITGET_ITEST_WRITE=1`.
+Live validation against production surfaced and FIXED three real bugs:
+- **UTA server time path** `/api/v3/public/time` (40404) → `/api/v3/market/time`.
+- **UTA orderbook** levels are JSON **numbers**, not strings → decode via
+  `decimal.Decimal` (accepts both). Regression test added.
+- **Demo `paptrading` scope** narrowed to signed `/api/v3/*` only (was
+  breaking `/public/time`, `/public/annoucements`, `/market/time`).
+
+**Open items — status after live run:** (1) candle **turnover** column —
+CONFIRMED present (col 6) and decoded; (2) `paptrading` — CONFIRMED venue
+accepts lowercase, and only on signed v3 (see above). REMAINING (need the
+owner's Demo key, signed tests written and ready): (3) the V3 batch
+place/cancel response shape on a real key (TestLive_UTA_Paper*); (4)
+`account/info` (`GetInfo`) field set (TestLive_UTA_AccountAssetsSettings).
 
 ### 📋 Planned
 

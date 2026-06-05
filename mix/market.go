@@ -396,27 +396,27 @@ func (m *MarketDataClient) GetHistoricalCandles1m(ctx context.Context, symbol st
 // tickerRow mirrors one row of /api/v2/mix/market/ticker. Bitget
 // returns a single-element list for a symbol query.
 type tickerRow struct {
-	Symbol             string `json:"symbol"`
-	LastPrice          string `json:"lastPr"`
-	MarkPrice          string `json:"markPrice"`
-	IndexPrice         string `json:"indexPrice"`
-	AskPrice           string `json:"askPr"`
-	BidPrice           string `json:"bidPr"`
-	FundingRate        string `json:"fundingRate"`
-	NextFundingTime    string `json:"nextFundingTime"`
-	Ts                 string `json:"ts"`
-	High24h            string `json:"high24h"`
-	Low24h             string `json:"low24h"`
-	BaseVolume         string `json:"baseVolume"`
-	QuoteVolume        string `json:"quoteVolume"`
-	UsdtVolume         string `json:"usdtVolume"`
-	OpenInterest       string `json:"holdingAmount"`
-	Open24hPrice       string `json:"open24h"`
-	OpenChangeUtc24h   string `json:"changeUtc24h"`
-	OpenChangePercent  string `json:"change24h"`
-	DeliveryStartTime  string `json:"deliveryStartTime"`
-	DeliveryTime       string `json:"deliveryTime"`
-	DeliveryStatus     string `json:"deliveryStatus"`
+	Symbol            string `json:"symbol"`
+	LastPrice         string `json:"lastPr"`
+	MarkPrice         string `json:"markPrice"`
+	IndexPrice        string `json:"indexPrice"`
+	AskPrice          string `json:"askPr"`
+	BidPrice          string `json:"bidPr"`
+	FundingRate       string `json:"fundingRate"`
+	NextFundingTime   string `json:"nextFundingTime"`
+	Ts                string `json:"ts"`
+	High24h           string `json:"high24h"`
+	Low24h            string `json:"low24h"`
+	BaseVolume        string `json:"baseVolume"`
+	QuoteVolume       string `json:"quoteVolume"`
+	UsdtVolume        string `json:"usdtVolume"`
+	OpenInterest      string `json:"holdingAmount"`
+	Open24hPrice      string `json:"open24h"`
+	OpenChangeUtc24h  string `json:"changeUtc24h"`
+	OpenChangePercent string `json:"change24h"`
+	DeliveryStartTime string `json:"deliveryStartTime"`
+	DeliveryTime      string `json:"deliveryTime"`
+	DeliveryStatus    string `json:"deliveryStatus"`
 }
 
 // GetMarketTicker returns the composite price snapshot for `symbol`.

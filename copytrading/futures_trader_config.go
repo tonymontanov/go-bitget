@@ -25,9 +25,9 @@ import (
 	"net/url"
 	"strconv"
 
+	copytypes "github.com/tonymontanov/go-bitget/v2/copytrading/types"
 	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
 	"github.com/tonymontanov/go-bitget/v2/internal/rest"
-	copytypes "github.com/tonymontanov/go-bitget/v2/copytrading/types"
 )
 
 // followersPageSize / followersMaxPages bound the page-number pagination

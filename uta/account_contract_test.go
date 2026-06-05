@@ -54,6 +54,29 @@ func TestContract_Account_AssetsAndSettings(t *testing.T) {
 	}
 }
 
+// TestContract_Account_DemoHeaderOnSignedV3 locks in the demo-routing rule:
+// in demo mode a SIGNED v3 account call must carry `paptrading: 1`.
+func TestContract_Account_DemoHeaderOnSignedV3(t *testing.T) {
+	t.Parallel()
+	var sawPap, sawSign string
+	var _, client = mockBitgetDynamic(t, true, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		sawPap = r.Header.Get("paptrading")
+		sawSign = r.Header.Get("ACCESS-SIGN")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"00000","msg":"success","data":{"accountEquity":"1","usdtEquity":"1","btcEquity":"0","unrealisedPnl":"0","usdtUnrealisedPnl":"0","btcUnrealizedPnl":"0","effEquity":"1","mmr":"0","imr":"0","mgnRatio":"0","positionMgnRatio":"0","assets":[]}}`))
+	})
+	var uc = utaClient(t, client)
+	if _, err := uc.Account().GetAssets(context.Background()); err != nil {
+		t.Fatalf("GetAssets: %v", err)
+	}
+	if sawSign == "" {
+		t.Error("account call must be signed")
+	}
+	if sawPap != "1" {
+		t.Errorf("demo mode must send paptrading:1 on signed v3, got %q", sawPap)
+	}
+}
+
 func TestContract_Account_SetLeverageAndHoldMode(t *testing.T) {
 	t.Parallel()
 	var leverageBody, holdBody []byte

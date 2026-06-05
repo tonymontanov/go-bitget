@@ -76,12 +76,15 @@ type Config struct {
 	// "go-bitget/1".
 	UserAgent string
 
-	// Demo — when true, every REST request carries the `paptrading: 1`
-	// header so Bitget routes it to the DEMO TRADING (paper) environment.
+	// Demo — when true, SIGNED V3 (UTA) requests carry the `paptrading: 1`
+	// header so Bitget routes them to the DEMO TRADING (paper) environment.
 	// Demo trading runs on the SAME production host with a dedicated Demo
 	// API Key (create one in the web UI under Demo mode). Available from
-	// v2.5; primarily for the UTA (V3) profile but applied transport-wide.
-	// WS demo (wss://wspap.bitget.com/...) is a separate, later concern.
+	// v2.5; it is a UTA(V3), account-scoped concept, so the header is sent
+	// ONLY on signed /api/v3/* calls — public market data is environment-
+	// agnostic and several public/common endpoints (server time,
+	// announcements) actually 40404 when the header is present. WS demo
+	// (wss://wspap.bitget.com/...) is a separate, later concern.
 	Demo bool
 
 	// RateLimitObserver — legacy observer (endpoint, headers). Kept for

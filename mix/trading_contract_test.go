@@ -44,9 +44,9 @@ import (
 // Concurrent-safe (sync.Mutex) because httptest.Server may serve
 // requests on different goroutines.
 type requestRecorder struct {
-	mu     sync.Mutex
-	path   string
-	body   map[string]any
+	mu      sync.Mutex
+	path    string
+	body    map[string]any
 	rawBody string
 }
 

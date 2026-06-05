@@ -316,6 +316,33 @@ SPOT (v2.0):
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 
+## Integration tests (live / DEMO)
+
+The unit/contract suite (`go test ./...`) is fully offline and uses mock
+servers. A separate **build-tagged** suite under [`integration/`](./integration)
+hits the real Bitget host and is excluded from normal builds:
+
+```bash
+# Unsigned public checks only — no credentials needed:
+go test -tags integration ./integration/ -run 'TestLive_(UTA_Server|UTA_Instr|UTA_Ticker|UTA_Funding|Common_)' -v
+
+# Full signed read-only suite against DEMO (paper) trading:
+export BITGET_API_KEY=...        # a DEMO API Key (create one in Demo mode)
+export BITGET_SECRET_KEY=...
+export BITGET_PASSPHRASE=...
+go test -tags integration ./integration/ -v
+
+# Opt in to PAPER write tests (far-from-market limit orders, cancelled
+# immediately) that confirm the V3 batch place/cancel response shape:
+BITGET_ITEST_WRITE=1 go test -tags integration ./integration/ -run TestLive_UTA_Paper -v
+```
+
+Demo (paper) trading is **on by default** for this suite (`BITGET_DEMO=1`
+implied; set `BITGET_DEMO=0` to target live — not recommended). Signed
+tests `t.Skip` when no credentials are present. See
+[`integration/harness_test.go`](./integration/harness_test.go) for the full
+ENV contract.
+
 ## Dependencies
 
 ```

@@ -340,11 +340,11 @@ func (t *TradingClient) CancelOrder(ctx context.Context, req roottypes.CancelOrd
 // Bitget requires productType + marginMode + marginCoin at the top
 // level (not per-row); orderList holds the per-row variants.
 type batchPlaceOrderBody struct {
-	ProductType string                  `json:"productType"`
-	MarginMode  string                  `json:"marginMode"`
-	MarginCoin  string                  `json:"marginCoin,omitempty"`
-	Symbol      string                  `json:"symbol"`
-	OrderList   []batchPlaceOrderEntry  `json:"orderList"`
+	ProductType string                 `json:"productType"`
+	MarginMode  string                 `json:"marginMode"`
+	MarginCoin  string                 `json:"marginCoin,omitempty"`
+	Symbol      string                 `json:"symbol"`
+	OrderList   []batchPlaceOrderEntry `json:"orderList"`
 }
 
 // batchPlaceOrderEntry is one row of orderList in batch-place-order.
@@ -987,4 +987,3 @@ func findRequestIndex(_ any, results []mixtypes.BatchOrderResult, target *mixtyp
 	}
 	return -1, false
 }
-

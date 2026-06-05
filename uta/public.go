@@ -49,7 +49,7 @@ func i64(s string) int64 {
 }
 
 // ---------------------------------------------------------------------
-// GetServerTime — public/time (unsigned).
+// GetServerTime — market/time (unsigned).
 // ---------------------------------------------------------------------
 
 type serverTimeRow struct {
@@ -62,7 +62,7 @@ func (p *PublicClient) GetServerTime(ctx context.Context) (int64, error) {
 	var err error
 	resp, _, err = p.c.rest().Do(ctx, rest.Options{
 		Method: "GET",
-		Path:   "/api/v3/public/time",
+		Path:   "/api/v3/market/time",
 		Signed: false,
 		Meta:   marketMeta(),
 	})
@@ -264,10 +264,14 @@ func (p *PublicClient) GetTickers(ctx context.Context, category utatypes.Categor
 // GetOrderBook — market/orderbook (unsigned).
 // ---------------------------------------------------------------------
 
+// orderBookRow mirrors the V3 depth payload. Bitget returns the price/size
+// pairs as bare JSON numbers (e.g. [62328.1,4.2248]) — NOT strings — so the
+// levels decode into decimal.Decimal, whose UnmarshalJSON accepts both JSON
+// numbers and quoted strings.
 type orderBookRow struct {
-	Asks [][]string `json:"a"`
-	Bids [][]string `json:"b"`
-	TS   string     `json:"ts"`
+	Asks [][]decimal.Decimal `json:"a"`
+	Bids [][]decimal.Decimal `json:"b"`
+	TS   string              `json:"ts"`
 }
 
 // GetOrderBook returns a depth snapshot. category and symbol are required;
@@ -313,22 +317,14 @@ func (p *PublicClient) GetOrderBook(ctx context.Context, category utatypes.Categ
 	return out, nil
 }
 
-func toLevels(scope string, raw [][]string) ([]utatypes.PriceLevel, error) {
+func toLevels(_ string, raw [][]decimal.Decimal) ([]utatypes.PriceLevel, error) {
 	var out []utatypes.PriceLevel = make([]utatypes.PriceLevel, 0, len(raw))
 	var i int
 	for i = 0; i < len(raw); i++ {
 		if len(raw[i]) < 2 {
 			continue
 		}
-		var lvl utatypes.PriceLevel
-		var err error
-		if err = dec(scope, &lvl.Price, raw[i][0]); err != nil {
-			return nil, err
-		}
-		if err = dec(scope, &lvl.Size, raw[i][1]); err != nil {
-			return nil, err
-		}
-		out = append(out, lvl)
+		out = append(out, utatypes.PriceLevel{Price: raw[i][0], Size: raw[i][1]})
 	}
 	return out, nil
 }

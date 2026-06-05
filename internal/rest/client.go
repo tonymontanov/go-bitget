@@ -127,7 +127,9 @@ type Options struct {
 	// Body — JSON body. Marshalled by codec; the resulting bytes are used
 	// both for the wire and for the signature pre-hash. Pass nil for GET.
 	Body any
-	// Signed — true for endpoints that require ACCESS-SIGN.
+	// Signed — true for endpoints that require ACCESS-SIGN. Also gates the
+	// demo `paptrading` header (see applyHeaders): demo routing is an
+	// account-scoped UTA(v3) concept, so only signed v3 calls carry it.
 	Signed bool
 	// Meta — request metadata for the rate-limit observer.
 	Meta RequestMeta
@@ -374,8 +376,13 @@ func (c *Client) applyHeaders(req *http.Request, opts Options, method, body, sig
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.demo {
-		// Route to Bitget demo (paper) trading. Requires a Demo API Key.
+	if c.demo && opts.Signed && strings.HasPrefix(opts.Path, "/api/v3/") {
+		// Route to Bitget demo (paper) trading. Demo is a UTA(v3),
+		// account-scoped concept, so the header belongs ONLY on signed v3
+		// requests. Public market data is environment-agnostic, and several
+		// public/common endpoints (e.g. /public/time, /public/annoucements)
+		// return 40404 "Request URL NOT FOUND" when the header is present —
+		// so we never attach it to unsigned or non-v3 calls.
 		req.Header.Set("paptrading", "1")
 	}
 

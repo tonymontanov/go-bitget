@@ -99,8 +99,9 @@ func MapHTTPStatus(status int) ErrorKind {
 // Anything outside the explicitly listed codes maps to ErrorKindExchange:
 // the SDK saw a non-success code, but does not pre-classify it.
 //
-//nolint:gocyclo,funlen // table-driven mapping with one case per code; a
 // switch is the right shape and matches the structure of Bitget's docs.
+//
+//nolint:gocyclo,funlen // table-driven mapping with one case per code; a
 func MapBitgetCode(code, _ string) ErrorKind {
 	switch code {
 	// ----- success -----

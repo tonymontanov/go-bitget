@@ -36,12 +36,12 @@ package types
 
 // AccountInfo — meta about the API key's owning account.
 type AccountInfo struct {
-	UserID       string
-	InviterID    string
-	IPs          string
-	Authorities  []string
-	ParentID     string
-	TraderType   string
-	ChannelCode  string
-	RegisTimeMs  int64
+	UserID      string
+	InviterID   string
+	IPs         string
+	Authorities []string
+	ParentID    string
+	TraderType  string
+	ChannelCode string
+	RegisTimeMs int64
 }

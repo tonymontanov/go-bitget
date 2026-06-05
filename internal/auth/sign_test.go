@@ -50,7 +50,7 @@ func TestSignerDisabled(t *testing.T) {
 
 func TestSignerPartialCredsDisabled(t *testing.T) {
 	var cases = []struct {
-		name string
+		name    string
 		k, s, p string
 	}{
 		{"missing apiKey", "", testSecret, testPassphrase},

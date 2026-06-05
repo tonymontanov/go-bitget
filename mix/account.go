@@ -388,27 +388,27 @@ func wrapPositionParseErr(field string, err error) error {
 // Bitget returns identical schemas on both endpoints (with /detail
 // returning a single-element list for a specific orderId).
 type orderRow struct {
-	Symbol        string `json:"symbol"`
-	Size          string `json:"size"`
-	OrderID       string `json:"orderId"`
-	ClientOid     string `json:"clientOid"`
-	BaseVolume    string `json:"baseVolume"`
-	Fee           string `json:"fee"`
-	Price         string `json:"price"`
-	PriceAvg      string `json:"priceAvg"`
-	State         string `json:"state"`
-	Side          string `json:"side"`
-	Force         string `json:"force"`
-	TotalProfits  string `json:"totalProfits"`
-	PosSide       string `json:"posSide"`
-	MarginCoin    string `json:"marginCoin"`
-	MarginMode    string `json:"marginMode"`
-	TradeSide     string `json:"tradeSide"`
-	Leverage      string `json:"leverage"`
-	OrderType     string `json:"orderType"`
-	CTime         string `json:"cTime"`
-	UTime         string `json:"uTime"`
-	ReduceOnly    string `json:"reduceOnly"`
+	Symbol       string `json:"symbol"`
+	Size         string `json:"size"`
+	OrderID      string `json:"orderId"`
+	ClientOid    string `json:"clientOid"`
+	BaseVolume   string `json:"baseVolume"`
+	Fee          string `json:"fee"`
+	Price        string `json:"price"`
+	PriceAvg     string `json:"priceAvg"`
+	State        string `json:"state"`
+	Side         string `json:"side"`
+	Force        string `json:"force"`
+	TotalProfits string `json:"totalProfits"`
+	PosSide      string `json:"posSide"`
+	MarginCoin   string `json:"marginCoin"`
+	MarginMode   string `json:"marginMode"`
+	TradeSide    string `json:"tradeSide"`
+	Leverage     string `json:"leverage"`
+	OrderType    string `json:"orderType"`
+	CTime        string `json:"cTime"`
+	UTime        string `json:"uTime"`
+	ReduceOnly   string `json:"reduceOnly"`
 }
 
 // openOrdersResp wraps the cursor-paginated /orders-pending payload.

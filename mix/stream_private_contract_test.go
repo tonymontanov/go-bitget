@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	bitget "github.com/tonymontanov/go-bitget/v2"
 	mixtypes "github.com/tonymontanov/go-bitget/v2/mix/types"
 	roottypes "github.com/tonymontanov/go-bitget/v2/types"
@@ -504,6 +506,86 @@ func TestContract_WatchPositions_FilterDropsForeignSymbol(t *testing.T) {
 	}
 	if got[0].Symbol != "BTCUSDT" {
 		t.Fatalf("expected BTCUSDT, got %q (filter regression)", got[0].Symbol)
+	}
+}
+
+// TestContract_WatchPositions_CloseSurfacesZero locks in the close/flat
+// detection: the Bitget V2 positions channel pushes a FULL snapshot of
+// the account's non-zero positions, so when the subscribed symbol drops
+// out of a frame its position is closed. The SDK must surface an explicit
+// ZERO position (echoing the symbol) so consumers reset inventory instead
+// of retaining a phantom position. Covers both the "only foreign symbol
+// remains" and the "empty array (all flat)" cases.
+func TestContract_WatchPositions_CloseSurfacesZero(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got []mixtypes.PositionInfo
+	var gotMu sync.Mutex
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchPositions(ctx, "BTCUSDT",
+		func(p mixtypes.PositionInfo) {
+			gotMu.Lock()
+			got = append(got, p)
+			gotMu.Unlock()
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchPositions: %v", err)
+	}
+	<-mock.subs
+
+	// Frame 1: BTCUSDT open (0.5 long).
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
+		[]map[string]any{{
+			"instId": "BTCUSDT", "marginCoin": "USDT", "holdSide": "long",
+			"marginMode": "crossed", "total": "0.5", "available": "0.5",
+			"frozen": "0", "leverage": "10",
+		}}, 1700000000050)
+
+	// Frame 2: only a FOREIGN symbol remains → BTCUSDT closed.
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
+		[]map[string]any{{
+			"instId": "ETHUSDT", "marginCoin": "USDT", "holdSide": "long",
+			"marginMode": "crossed", "total": "1", "available": "1",
+			"frozen": "0", "leverage": "5",
+		}}, 1700000000060)
+
+	// Frame 3: empty snapshot → everything flat (idempotent zero).
+	mock.pushFrame(t, "snapshot", "USDT-FUTURES", "positions", "default",
+		[]map[string]any{}, 1700000000070)
+
+	waitFor(t, time.Second, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) >= 3
+	})
+	gotMu.Lock()
+	defer gotMu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 callbacks (open + 2 closes), got %d: %#v", len(got), got)
+	}
+	if !got[0].Quantity.Equal(decimal.RequireFromString("0.5")) {
+		t.Fatalf("frame1 should be 0.5 long, got %s", got[0].Quantity)
+	}
+	// Both close frames must surface a zero position echoing the symbol.
+	var idx int
+	for idx = 1; idx <= 2; idx++ {
+		if got[idx].Symbol != "BTCUSDT" {
+			t.Fatalf("close[%d] symbol: want BTCUSDT, got %q", idx, got[idx].Symbol)
+		}
+		if !got[idx].Quantity.IsZero() {
+			t.Fatalf("close[%d] qty: want 0, got %s", idx, got[idx].Quantity)
+		}
 	}
 }
 

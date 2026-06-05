@@ -30,9 +30,9 @@ import (
 	"net/url"
 	"strconv"
 
+	copytypes "github.com/tonymontanov/go-bitget/v2/copytrading/types"
 	"github.com/tonymontanov/go-bitget/v2/internal/bgcommon"
 	"github.com/tonymontanov/go-bitget/v2/internal/rest"
-	copytypes "github.com/tonymontanov/go-bitget/v2/copytrading/types"
 )
 
 // FuturesFollowerClient — futures follower sub-client. Built once per

@@ -482,6 +482,7 @@ func (s *StreamClient) handlePositionsFrame(
 		s.surfaceError(errHandler, "WatchPositions", "decode positions frame", err)
 		return
 	}
+	var matched bool
 	var i int
 	for i = 0; i < len(rows); i++ {
 		if symbolFilter != "" && rows[i].InstID != symbolFilter {
@@ -494,7 +495,24 @@ func (s *StreamClient) handlePositionsFrame(
 			s.surfaceError(errHandler, "WatchPositions", "parse positions row", err)
 			continue
 		}
+		matched = true
 		handler(info)
+	}
+	// CLOSE / FLAT detection. The Bitget V2 "positions" channel always
+	// pushes a FULL snapshot of the account's NON-ZERO positions (action is
+	// always "snapshot"; pushes are event-triggered by open/close/fill/
+	// cancel). Therefore, when a single-symbol subscriber's symbol is ABSENT
+	// from a frame, its position has been closed (flat). Without this, the
+	// SDK would silently surface nothing on close and consumers would retain
+	// the last non-zero position until the next REST reconcile — showing a
+	// phantom position that no longer exists. Surface an explicit zero so
+	// downstream inventory resets immediately. This mirrors the REST
+	// "no exposure" path, which returns a zero PositionInfo echoing symbol.
+	//
+	// Only done for a concrete symbol filter; with an empty filter ("default"
+	// = all symbols) absence cannot be attributed to a specific symbol.
+	if symbolFilter != "" && !matched {
+		handler(mixtypes.PositionInfo{Symbol: symbolFilter})
 	}
 }
 
@@ -571,28 +589,28 @@ func (s *StreamClient) handleFillsFrame(
 //   - accBaseVolume / fillPrice / fillSize / priceAvg
 //     (REST collapses fills into baseVolume / priceAvg only).
 type wsOrderRow struct {
-	InstID         string     `json:"instId"`
-	OrderID        string     `json:"orderId"`
-	ClientOid      string     `json:"clientOid"`
-	Side           string     `json:"side"`
-	TradeSide      string     `json:"tradeSide"`
-	PosSide        string     `json:"posSide"`
-	OrderType      string     `json:"orderType"`
-	Force          string     `json:"force"`
-	Status         string     `json:"status"`
-	Size           bgcommon.FlexString `json:"size"`
-	Price          bgcommon.FlexString `json:"price"`
-	NotionalUSD    bgcommon.FlexString `json:"notionalUsd"`
-	AccBaseVolume  bgcommon.FlexString `json:"accBaseVolume"`
-	PriceAvg       bgcommon.FlexString `json:"priceAvg"`
-	Fee            bgcommon.FlexString `json:"fee"`
-	FeeDetailRaw   string     `json:"feeDetail"`
-	MarginCoin     string     `json:"marginCoin"`
-	MarginMode     string     `json:"marginMode"`
-	Leverage       bgcommon.FlexString `json:"leverage"`
-	ReduceOnly     string     `json:"reduceOnly"`
-	CTime          bgcommon.FlexString `json:"cTime"`
-	UTime          bgcommon.FlexString `json:"uTime"`
+	InstID        string              `json:"instId"`
+	OrderID       string              `json:"orderId"`
+	ClientOid     string              `json:"clientOid"`
+	Side          string              `json:"side"`
+	TradeSide     string              `json:"tradeSide"`
+	PosSide       string              `json:"posSide"`
+	OrderType     string              `json:"orderType"`
+	Force         string              `json:"force"`
+	Status        string              `json:"status"`
+	Size          bgcommon.FlexString `json:"size"`
+	Price         bgcommon.FlexString `json:"price"`
+	NotionalUSD   bgcommon.FlexString `json:"notionalUsd"`
+	AccBaseVolume bgcommon.FlexString `json:"accBaseVolume"`
+	PriceAvg      bgcommon.FlexString `json:"priceAvg"`
+	Fee           bgcommon.FlexString `json:"fee"`
+	FeeDetailRaw  string              `json:"feeDetail"`
+	MarginCoin    string              `json:"marginCoin"`
+	MarginMode    string              `json:"marginMode"`
+	Leverage      bgcommon.FlexString `json:"leverage"`
+	ReduceOnly    string              `json:"reduceOnly"`
+	CTime         bgcommon.FlexString `json:"cTime"`
+	UTime         bgcommon.FlexString `json:"uTime"`
 }
 
 // wsPositionRow mirrors one element of the "positions" data array.
@@ -601,10 +619,10 @@ type wsOrderRow struct {
 //   - instId  instead of symbol;
 //   - frozen  instead of locked.
 type wsPositionRow struct {
-	InstID           string     `json:"instId"`
-	MarginCoin       string     `json:"marginCoin"`
-	HoldSide         string     `json:"holdSide"`
-	HoldMode         string     `json:"holdMode"`
+	InstID           string              `json:"instId"`
+	MarginCoin       string              `json:"marginCoin"`
+	HoldSide         string              `json:"holdSide"`
+	HoldMode         string              `json:"holdMode"`
 	OpenDelegateSize bgcommon.FlexString `json:"openDelegateSize"`
 	MarginSize       bgcommon.FlexString `json:"marginSize"`
 	Available        bgcommon.FlexString `json:"available"`
@@ -613,7 +631,7 @@ type wsPositionRow struct {
 	Leverage         bgcommon.FlexString `json:"leverage"`
 	AchievedProfits  bgcommon.FlexString `json:"achievedProfits"`
 	OpenPriceAvg     bgcommon.FlexString `json:"openPriceAvg"`
-	MarginMode       string     `json:"marginMode"`
+	MarginMode       string              `json:"marginMode"`
 	UnrealizedPL     bgcommon.FlexString `json:"unrealizedPL"`
 	LiquidationPrice bgcommon.FlexString `json:"liquidationPrice"`
 	KeepMarginRate   bgcommon.FlexString `json:"keepMarginRate"`
@@ -628,7 +646,7 @@ type wsPositionRow struct {
 // "account" channel is per-coin: each row carries balance fields for
 // one margin coin. For USDT-FUTURES the array is length 1.
 type wsAccountRow struct {
-	MarginCoin         string     `json:"marginCoin"`
+	MarginCoin         string              `json:"marginCoin"`
 	Frozen             bgcommon.FlexString `json:"frozen"`
 	Available          bgcommon.FlexString `json:"available"`
 	MaxOpenPosAvail    bgcommon.FlexString `json:"maxOpenPosAvailable"`

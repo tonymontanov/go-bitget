@@ -369,6 +369,41 @@ REST-only, **not** product-type scoped, no WebSocket. Lazy
   records, the P2P merchant profile + list, and the caller's virtual
   sub-accounts (no virtual sub-account / API-key state is changed).
 
+### Phase 8 — Live / DEMO integration testing (and the fixes it surfaced)
+
+- **New build-tagged integration suite** under `integration/` (run with
+  `go test -tags integration ./integration/...`). It exercises the SDK
+  against the real Bitget host. Demo (paper) trading is forced on by
+  default so signed calls hit a DEMO API Key; unsigned public tests run
+  with no credentials, signed tests skip when none are configured, and
+  paper-trading WRITE tests are gated behind `BITGET_ITEST_WRITE=1`. See
+  `integration/harness_test.go` for the ENV contract.
+- **Fix — UTA server-time path.** `uta.Public.GetServerTime` hit
+  `/api/v3/public/time`, which the venue returns `40404` for. The correct
+  V3 path is `/api/v3/market/time`. Confirmed live.
+- **Fix — UTA order-book decoding.** `uta.Public.GetOrderBook` assumed the
+  depth levels were `[][]string`, but V3 returns the price/size pairs as
+  bare JSON **numbers** (e.g. `[[62328.1,4.2248], ...]`). Levels now decode
+  into `decimal.Decimal`, which accepts both JSON numbers and quoted
+  strings. Regression test added.
+- **Fix — demo `paptrading` header scope.** The header was attached to
+  *every* request in demo mode, which made unsigned/common endpoints
+  (`/api/v2/public/time`, `/api/v2/public/annoucements`,
+  `/api/v3/market/time`) return `40404`. Demo is a UTA(v3), account-scoped
+  concept, so the header is now sent **only on signed `/api/v3/*` calls**.
+  `Config.Demo` doc updated; positive/negative contract tests added.
+- **Fix — MIX `WatchPositions` close → zero.** Bitget's V2 `positions`
+  channel only pushes **non-zero** positions; when a position closes its
+  symbol simply disappears from the snapshot (or an empty `data:[]` frame
+  arrives). The stream silently dropped these, so a symbol-filtered
+  consumer kept showing a stale (phantom) position after a flat. The
+  handler now emits a zero `PositionInfo` for the subscribed symbol when
+  it is absent from a frame, so consumers reset to flat immediately.
+  Contract test `TestContract_WatchPositions_CloseSurfacesZero` added.
+- **Confirmed open items (live).** V3 candles include the turnover column
+  (col 6) and decode correctly; instruments/tickers/funding/position-tier/
+  open-interest wire shapes parse cleanly against production.
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS

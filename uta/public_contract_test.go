@@ -22,11 +22,13 @@ func TestContract_Public_ServerTime_UnsignedAndDemo(t *testing.T) {
 	t.Parallel()
 	var sawSign bool
 	var sawPap string
+	var sawPath string
 	var _, client = mockBitgetDynamic(t, true, func(w http.ResponseWriter, r *http.Request, body []byte) {
 		if r.Header.Get("ACCESS-SIGN") != "" {
 			sawSign = true
 		}
 		sawPap = r.Header.Get("paptrading")
+		sawPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":"00000","msg":"success","data":{"serverTime":"1700000000123"}}`))
 	})
@@ -39,11 +41,16 @@ func TestContract_Public_ServerTime_UnsignedAndDemo(t *testing.T) {
 	if ms != 1700000000123 {
 		t.Fatalf("want 1700000000123, got %d", ms)
 	}
-	if sawSign {
-		t.Error("public/time must be unsigned")
+	if sawPath != "/api/v3/market/time" {
+		t.Errorf("want path /api/v3/market/time, got %q", sawPath)
 	}
-	if sawPap != "1" {
-		t.Errorf("demo mode must send paptrading:1, got %q", sawPap)
+	if sawSign {
+		t.Error("server time must be unsigned")
+	}
+	// Server-time endpoints 40404 with paptrading present, so the SDK must
+	// NOT send the demo header here even when demo mode is enabled.
+	if sawPap != "" {
+		t.Errorf("server time must NOT send paptrading even in demo mode, got %q", sawPap)
 	}
 }
 
@@ -130,6 +137,32 @@ func TestContract_Public_TickersAndBook(t *testing.T) {
 	// Guards.
 	if _, err := uc.Public().GetOrderBook(ctx, utatypes.CategoryUSDTFutures, "", 0); err == nil {
 		t.Error("GetOrderBook(no symbol): want guard")
+	}
+}
+
+// TestContract_Public_OrderBook_NumericLevels locks in the live wire shape:
+// V3 returns price/size as bare JSON NUMBERS (not strings). Regression guard
+// for the decoder fix.
+func TestContract_Public_OrderBook_NumericLevels(t *testing.T) {
+	t.Parallel()
+	var routes = map[string]string{
+		"/api/v3/market/orderbook": `{"code":"00000","msg":"success","data":{"a":[[62328.1,4.2248],[62328.2,0.0001]],"b":[[62328.0,2.8632]],"ts":"1780659227100"}}`,
+	}
+	var _, client = mockBitget(t, routes, nil)
+	var uc = utaClient(t, client)
+
+	var ob, err = uc.Public().GetOrderBook(context.Background(), utatypes.CategoryUSDTFutures, "BTCUSDT", 5)
+	if err != nil {
+		t.Fatalf("GetOrderBook(numeric levels): %v", err)
+	}
+	if len(ob.Asks) != 2 || len(ob.Bids) != 1 {
+		t.Fatalf("unexpected depth: %+v", ob)
+	}
+	if !ob.Asks[0].Price.Equal(decv("62328.1")) || !ob.Asks[0].Size.Equal(decv("4.2248")) {
+		t.Fatalf("ask[0] mismatch: %+v", ob.Asks[0])
+	}
+	if !ob.Bids[0].Price.Equal(decv("62328.0")) || ob.TimeMs != 1780659227100 {
+		t.Fatalf("bid/ts mismatch: %+v", ob)
 	}
 }
 
