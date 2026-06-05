@@ -70,6 +70,9 @@ type Client struct {
 
 	brokerOnce sync.Once
 	brokerVal  any
+
+	commonOnce sync.Once
+	commonVal  any
 }
 
 // NewClient validates cfg, fills defaults, and returns a configured root
@@ -350,6 +353,30 @@ func (c *Client) Broker() any {
 		c.brokerVal = brokerFactory(c)
 	})
 	return c.brokerVal
+}
+
+// commonFactory is set by common.init() via RegisterCommonFactory.
+var commonFactory func(c *Client) any
+
+// RegisterCommonFactory wires the common.Client builder. Idempotent.
+// Available from v2.5.
+func RegisterCommonFactory(f func(c *Client) any) {
+	if commonFactory == nil {
+		commonFactory = f
+	}
+}
+
+// Common returns the *common.Client (typed as any). nil when the common
+// package has not been imported. Available from v2.5.
+func (c *Client) Common() any {
+	c.commonOnce.Do(func() {
+		if commonFactory == nil {
+			c.logger.Warn(`bitget.Client.Common: common factory is not registered; available from v2.5`)
+			return
+		}
+		c.commonVal = commonFactory(c)
+	})
+	return c.commonVal
 }
 
 // Compile-time assertion: *Error implements the error interface.
