@@ -176,3 +176,49 @@ type TraderFollower struct {
 	AccountEquity   decimal.Decimal
 	FollowerTimeMs  int64
 }
+
+// --- M3c: profit ------------------------------------------------------
+
+// ProfitHistoryCoin — per-currency profit-share rollup inside
+// ProfitSummary.
+type ProfitHistoryCoin struct {
+	Coin             string
+	ProfitCount      decimal.Decimal
+	LastProfitTimeMs int64
+}
+
+// ProfitSummary — response of GET mix-trader/profit-history-summarys:
+// the headline profit-share figures plus a per-currency breakdown.
+type ProfitSummary struct {
+	YesterdayProfit decimal.Decimal
+	SumProfit       decimal.Decimal
+	WaitProfit      decimal.Decimal
+	YesterdayTimeMs int64
+	History         []ProfitHistoryCoin
+}
+
+// ProfitShareRecord — one row of GET mix-trader/profit-history-details:
+// a distributed profit-share event (per follower).
+type ProfitShareRecord struct {
+	ProfitID     string
+	Coin         string
+	NickName     string
+	Profit       decimal.Decimal
+	ProfitTimeMs int64
+}
+
+// PendingProfitShare — one row of GET mix-trader/profit-details: a
+// to-be-distributed profit share (per follower).
+type PendingProfitShare struct {
+	Coin     string
+	NickName string
+	Profit   decimal.Decimal
+}
+
+// ProfitByCoinDate — one row of GET mix-trader/profits-group-coin-date:
+// realised profit aggregated by currency and date.
+type ProfitByCoinDate struct {
+	Coin         string
+	Profit       decimal.Decimal
+	ProfitTimeMs int64
+}
