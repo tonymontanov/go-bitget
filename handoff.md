@@ -215,7 +215,7 @@ Agreed phase order:
 | 1 | **Futures completeness** — validate COIN-FUTURES / USDC-FUTURES across `mix/` and pin the wire deltas | ✅ (this session) |
 | 2 | `margin/` — cross + isolated (one package parameterised by mode) | ✅ M1–M4 done (this session) |
 | 3 | Copy Trading — futures + spot | ✅ M1–M5 done (this session) |
-| 4 | `earn/` + `convert/` | 📋 |
+| 4 | `earn/` + `convert/` | ✅ done (this session) |
 | 5 | `broker/` (Agent) | 📋 |
 | 6 | Common / public utilities round-out | 📋 |
 | 7 | `uta/` — V3 Unified Trading Account (hedge mode, demo/testnet hosts) | 📋 |
@@ -339,9 +339,56 @@ Milestone state:
   shapes throughout sourced from the Bitget V2 docs (CoinTR mirror for
   the spot slugs). Full suite green.
 
+**Phase 4 — done (`earn/` + `convert/`).** Two new top-level packages for
+Bitget's account-level yield + swap surfaces. Both **REST-only** and
+**not** product-type scoped (no `productType`, no WS); lazy
+`bitget.Client.Earn()` / `.Convert()` factories like the other profiles.
+Wire shapes + request params sourced from the V2 docs and the
+tiagosiebler / tty666 reference clients (the official doc slugs were
+flaky; the reference TS request/response types filled the gaps). Owner
+validates live.
+
+Milestone state:
+
+- **P4-C (`convert/`) — done.** 7 endpoints: `currencies`,
+  `quoted-price` (RFQ), `trade`, `convert-record` (cursor), and the BGB
+  small-balance trio (`bgb-convert-coin-list` / `bgb-convert` /
+  `bgb-convert-records`). Two-step swap: `GetQuotedPrice` → `traceId` +
+  `cnvtPrice` (TTL ~8s) fed into `Trade`. **Naming delta to confirm
+  live:** the GET quoted-price uses `fromCoinSz`/`toCoinSz` query keys
+  while the POST trade body uses `fromCoinSize`/`toCoinSize` (the doc
+  curl + param description disagree with the column header; chose the
+  curl/description spelling). `bgb-convert` body is a JSON array
+  `coinList` per the doc curl.
+- **P4-E1 (`earn/` scaffold + Savings + Account) — done.** Category
+  sub-clients off `earn.Client` (Account/Savings/SharkFin/Elite/Loan).
+  Account `assets`; Savings `product`/`account`/`assets`(cursor)/
+  `records`(cursor)/`subscribe-info`/`subscribe`/`subscribe-result`/
+  `redeem`/`redeem-result`. `assets`/`records` require a `periodType`
+  (`flexible`|`fixed`); subscribe/redeem-result return `{result,msg}`.
+- **P4-E2 (Shark Fin + On-Chain Elite) — done.** Shark Fin (7): product
+  (cursor), account, assets (by status, cursor), records (by type,
+  cursor), subscribe-info, subscribe, subscribe-result. Elite (8):
+  product, assets (single `resultList`), records (cursor over
+  `recordList` via `cursor`/`endId`), subscribe-info, subscribe,
+  subscribe-result (status), redeem-info, redeem. Elite `redeemType` /
+  `paymentAccount` decode from string-or-array via a `flexStringList`.
+- **P4-E3 (Crypto Loan, 11) — done.** `public/coinInfos` +
+  `public/hour-interest` are **unsigned**; `borrow` (exactly-one-of
+  pledgeAmount/loanAmount), `repay`, `revise-pledge`, `ongoing-orders`,
+  `debts`, plus the page-number paginated `repay-history`,
+  `revise-history`, `borrow-history`, `reduces` (all require a
+  `[startTime,endTime]` window). Profile-local `paginateByPageNo`
+  (mirrors the copytrading helper) with a hard page ceiling.
+- **P4-E4 (example + docs) — done.** `examples/earn`: read-only demo
+  across both profiles (earn account overview; savings / shark-fin /
+  elite products + held positions; loan currency table + ongoing orders;
+  convert currency list + a sample RFQ quote — no funds moved). Full
+  suite green (`go test -race ./...`).
+
 ### 📋 Planned
 
-- **`v2.5` phases 4–7** — see the table above. Each phase: two-layer
+- **`v2.5` phases 5–7** — see the table above. Each phase: two-layer
   (lift shared into `bgcommon`), contract tests at parity, then a
   review pause. `uta/` is additive and must not change V2 behaviour;
   `WatchPositions` stays mix-only by venue contract until UTA

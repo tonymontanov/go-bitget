@@ -272,6 +272,16 @@ SPOT (v2.0):
   ignores it). Reads `BITGET_COPY_*` credentials (falling back to the
   generic `BITGET_*` triple).
 
+**EARN + CONVERT profiles (v2.5):**
+
+- [`examples/earn`](./examples/earn) — **read-only** signed REST across
+  both profiles: the Earn account overview, the savings / shark-fin /
+  on-chain-elite products and held positions, the crypto-loan currency
+  table + ongoing orders, and the convert (flash-swap) currency list
+  plus a sample RFQ quote (no subscribe / redeem / borrow / swap is
+  executed). Reads `BITGET_EARN_*` credentials (falling back to the
+  generic `BITGET_*` triple).
+
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 

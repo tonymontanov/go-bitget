@@ -158,6 +158,61 @@ later phase. SDK-only; the desk connector is untouched.
   eligibility 4xx treated as an expected note (non-elite accounts).
   `-product-type` flag exercises the COIN / USDC futures venues.
 
+### Phase 4 — EARN + CONVERT profiles
+
+Two new top-level packages for Bitget's account-level yield + swap
+surfaces. Both are REST-only and **not** product-type scoped; no
+WebSocket. Lazy `bitget.Client.Earn()` / `.Convert()` factories follow
+the established `Mix` / `Spot` / `Margin` / `CopyTrading` pattern.
+
+- **`convert/`** — the V2 CONVERT (flash-swap) surface
+  (`/api/v2/convert/*`), 7 endpoints: `currencies`, `quoted-price`
+  (RFQ), `trade`, `convert-record` (cursor paged), plus the BGB
+  small-balance conversion (`bgb-convert-coin-list`, `bgb-convert`,
+  `bgb-convert-records`). Two-step swap: `GetQuotedPrice` returns a
+  `traceId` + `cnvtPrice` with a short TTL (~8s) that `Trade` echoes
+  back. The GET quoted-price uses the venue `fromCoinSz` / `toCoinSz`
+  query keys while the POST trade body uses `fromCoinSize` /
+  `toCoinSize` (the response echoes the `...Size` spelling); to be
+  confirmed by the live smoke run.
+- **`earn/`** — the V2 EARN surface (`/api/v2/earn/*`), 36 endpoints
+  organised as category sub-clients off `earn.Client` (mirroring
+  Bitget's grouping):
+  - **Account** (1): `account/assets` — the per-coin overview across all
+    earn products.
+  - **Savings** (9): `product`, `account`, `assets` (cursor), `records`
+    (cursor), `subscribe-info`, `subscribe`, `subscribe-result`,
+    `redeem`, `redeem-result`. `assets` / `records` require a
+    `periodType` (`flexible` | `fixed`).
+  - **Shark Fin** (7): `product` (cursor), `account`, `assets` (by
+    status, cursor), `records` (by type, cursor), `subscribe-info`,
+    `subscribe`, `subscribe-result`.
+  - **On-Chain Elite** (8): `product`, `assets` (single `resultList`),
+    `records` (cursor over `recordList` via `cursor`/`endId`),
+    `subscribe-info`, `subscribe`, `subscribe-result` (status),
+    `redeem-info`, `redeem`. The `redeemType` / `paymentAccount` fields
+    decode from either a string or a string array.
+  - **Crypto Loan** (11): the two `public/*` endpoints (`coinInfos`,
+    `hour-interest`) are **unsigned**; `borrow`, `repay`,
+    `revise-pledge`, `ongoing-orders`, `debts`, plus the page-number
+    paginated history endpoints `repay-history`, `revise-history`,
+    `borrow-history`, `reduces`. `borrow` requires exactly one of
+    `pledgeAmount` / `loanAmount`; the history endpoints require a
+    `[startTime,endTime]` window.
+
+  Subscribe / redeem / borrow / repay / convert move real funds — the SDK
+  validates the obvious client-side preconditions only. Request params and
+  wire shapes were verified against the V2 docs and the
+  tiagosiebler / tty666 reference clients. Contract tests pin the wire
+  shapes, the no-`productType` invariant, the unsigned-public loan
+  invariant, the cursor / page-number pagination mechanics, the
+  union-field decode and the required-field guards.
+- **`examples/earn`** — runnable, **read-only** demo across both
+  profiles: the Earn account overview, the savings / shark-fin / elite
+  products and held positions, the loan currency table + ongoing orders,
+  and the convert currency list plus a sample RFQ quote (no swap is
+  executed).
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS
