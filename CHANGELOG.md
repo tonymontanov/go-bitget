@@ -97,6 +97,67 @@ the desk connector is untouched.
   → list open orders → cancel) with a `-mode crossed|isolated` flag;
   price discovery via the spot profile (margin has no market data).
 
+### Phase 3 — COPY-TRADING profile (futures + spot, trader + follower)
+
+New top-level package `copytrading/` for the Bitget V2 copy-trading
+surface (`/api/v2/copy/...`). The profile is a 2×2 of product (futures /
+spot) × role (lead trader / follower), exposed as four sub-clients off
+`bitget.Client.CopyTrading()` (lazy-init, same factory pattern as
+`Mix()` / `Spot()` / `Margin()`). REST-only — copy trading ships no
+dedicated WebSocket. The futures **product type** (USDT / COIN /
+USDC-FUTURES) is pinned at construction via `copytrading.ClientSettings`
+and sent on every futures call; **spot copy trading ignores it** (spot
+is not product-type scoped). Broker / agent endpoints are deferred to a
+later phase. SDK-only; the desk connector is untouched.
+
+- **M1 — scaffold.** Root `CopyTrading()` factory; `copytrading.Client`
+  with `ClientSettings{ProductType}` and the `FuturesTrader` /
+  `FuturesFollower` / `SpotTrader` / `SpotFollower` accessors; shared
+  helpers (`errInvalid` / `errParse` / `queryMeta`). Sub-clients filled
+  in M2–M4.
+- **M2 — futures follower core.** `GetMyTraders`, `GetCurrentOrders`,
+  `GetHistoryOrders`, `ClosePositions`, `Unfollow` against
+  `mix-follower/{query-traders,query-current-orders,query-history-orders,close-positions,cancel-trader}`.
+  Cursor pagination for history; `openPriceAvg`/`openAvgPrice` spelling
+  fallback pinned by tests.
+- **M2b — futures follower config.** `UpdateSettings`, `GetSettings`,
+  `SetTPSL`, `GetCopyLimit` against
+  `mix-follower/{settings,query-settings,setting-tpsl,query-quantity-limit}`.
+  Per-symbol settings stamp the pinned `productType`; TP/SL prices kept
+  as strings for the empty / `"0"` / `>0` three-way semantics;
+  `followerEnable` mapped to a `Following` bool.
+- **M3 — futures lead trader (full surface, 14 endpoints).** Orders
+  (`order-current-track` / `order-history-track` / `order-total-detail`
+  / `order-modify-tpsl` / `order-close-positions`), config
+  (`config-query-symbols` / `config-setting-symbols` /
+  `config-settings-base` / `config-query-followers` /
+  `config-remove-follower`) and profit (`profit-history-summarys` /
+  `profit-history-details` / `profits-detail` / `profits-group-coin-date`).
+  Introduced the generic `paginateByPageNo` helper (page-number
+  pagination with a hard page ceiling) alongside the cursor paginator;
+  `TotalPL` kept raw (string) because the venue can prefix a currency
+  symbol.
+- **M4a — spot lead trader (12 endpoints).** Orders
+  (`order-current-track` / `order-history-track` / `order-total-detail`
+  / `order-modify-tpsl` / `order-close-tracking`), config
+  (`config-query-settings` / `config-setting-symbols` /
+  `config-query-followers` / `config-remove-follower`) and profit
+  (`profit-summarys` / `profit-history-details` / `profit-details`).
+  Spot tracks buy/sell orders rather than long/short positions; **no
+  call sends `productType`** (pinned by a dedicated invariant test).
+- **M4b — spot follower (10 endpoints).** `query-traders`,
+  `query-trader-symbols`, `query-settings` (active rows + venue
+  min/max bounds), `settings`, `setting-tpsl`, `query-current-orders`,
+  `query-history-orders`, `order-close-tracking`, `stop-order`,
+  `cancel-trader`. Required per-row settings fields and the ≤50 batch
+  limit guarded client-side; empty membership-tier (`platsk*`) limits
+  parse to zero.
+- **`examples/copytrading`** — runnable, **read-only** demo across all
+  four roles: lists the caller's followed traders (futures + spot) and,
+  behind `-trader`, prints the lead-trader summaries with the
+  eligibility 4xx treated as an expected note (non-elite accounts).
+  `-product-type` flag exercises the COIN / USDC futures venues.
+
 ## v2.0.0 — 2026-06-04 (SPOT GA roll-up)
 
 General-availability cut of the **v2.0 SPOT** profile. No new REST/WS

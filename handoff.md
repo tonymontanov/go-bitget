@@ -214,7 +214,7 @@ Agreed phase order:
 | 0 | branch `v2.5` from `main` | ✅ |
 | 1 | **Futures completeness** — validate COIN-FUTURES / USDC-FUTURES across `mix/` and pin the wire deltas | ✅ (this session) |
 | 2 | `margin/` — cross + isolated (one package parameterised by mode) | ✅ M1–M4 done (this session) |
-| 3 | Copy Trading — futures + spot | 📋 |
+| 3 | Copy Trading — futures + spot | ✅ M1–M5 done (this session) |
 | 4 | `earn/` + `convert/` | 📋 |
 | 5 | `broker/` (Agent) | 📋 |
 | 6 | Common / public utilities round-out | 📋 |
@@ -297,9 +297,51 @@ Milestone state:
 - **Example + tests.** `examples/margin` (signed place→list→cancel with
   `-mode` flag, prices via spot). Full suite green incl. `-race`.
 
+**Phase 3 — done (`copytrading/`, futures + spot, trader + follower).**
+New top-level package `copytrading/` for the V2 copy-trading surface
+(`/api/v2/copy/...`). Design agreed with the owner: a 2×2 of product
+(futures / spot) × role (lead trader / follower) as four sub-clients off
+`bitget.Client.CopyTrading()` (lazy factory like `Mix`/`Spot`/`Margin`).
+**REST-only** — copy trading ships no dedicated WS. Futures **product
+type** pinned at construction via `copytrading.ClientSettings` and sent
+on every futures call; **spot ignores it** (spot is not product-type
+scoped — pinned by a no-`productType` invariant test). Broker/agent
+endpoints deferred to Phase 5.
+
+Milestone state:
+
+- **M1 (scaffold) — done.** Root `CopyTrading()` factory; `Client` +
+  `ClientSettings{ProductType}` + the four accessors; shared helpers
+  (`errInvalid`/`errParse`/`queryMeta`).
+- **M2 + M2b (futures follower) — done.** Core (`query-traders`,
+  `query-current-orders`, `query-history-orders`, `close-positions`,
+  `cancel-trader`) + config (`settings`, `query-settings`,
+  `setting-tpsl`, `query-quantity-limit`). Cursor pagination;
+  `openPriceAvg`/`openAvgPrice` spelling fallback; TP/SL prices as
+  strings for empty/`"0"`/`>0`; `followerEnable` → `Following` bool.
+- **M3 (futures lead trader, 14 endpoints) — done.** M3a orders / M3b
+  config / M3c profit across `mix-trader/*`. Added the generic
+  `paginateByPageNo` helper (page-number pagination + hard page ceiling);
+  `TotalPL` kept raw (string) for the currency prefix.
+- **M4a (spot lead trader, 12 endpoints) — done.** `spot-trader/*`
+  orders + config (`config-query-settings` single blob, not the futures
+  symbols+base split) + profit (`profit-summarys` /
+  `profit-history-details` / `profit-details`). No `productType`.
+- **M4b (spot follower, 10 endpoints) — done.** `spot-follower/*`:
+  query-traders (page-no), query-trader-symbols, query-settings (active
+  rows + venue bounds), settings, setting-tpsl, current/history orders
+  (cursor), order-close-tracking, stop-order, cancel-trader. ≤50 batch
+  guard; empty `platsk*` tier limits → zero.
+- **M5 (example + docs) — done.** `examples/copytrading`: read-only demo
+  across all four roles (lists followed traders futures+spot; with
+  `-trader` reads the lead summaries, treating the eligibility 4xx as an
+  expected note for non-elite accounts; `-product-type` flag). Wire
+  shapes throughout sourced from the Bitget V2 docs (CoinTR mirror for
+  the spot slugs). Full suite green.
+
 ### 📋 Planned
 
-- **`v2.5` phases 2–7** — see the table above. Each phase: two-layer
+- **`v2.5` phases 4–7** — see the table above. Each phase: two-layer
   (lift shared into `bgcommon`), contract tests at parity, then a
   review pause. `uta/` is additive and must not change V2 behaviour;
   `WatchPositions` stays mix-only by venue contract until UTA

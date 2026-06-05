@@ -262,6 +262,16 @@ SPOT (v2.0):
   prices come from the spot profile. Reads `BITGET_MARGIN_*` credentials
   (falling back to the generic `BITGET_*` triple).
 
+**COPY-TRADING profile (v2.5):**
+
+- [`examples/copytrading`](./examples/copytrading) — **read-only** signed
+  REST across all four roles: lists the caller's followed traders
+  (futures + spot) and, behind `-trader`, prints the lead-trader order
+  summaries (a non-elite account gets an expected eligibility note, not a
+  failure). `-product-type` selects the COIN / USDC futures venue (spot
+  ignores it). Reads `BITGET_COPY_*` credentials (falling back to the
+  generic `BITGET_*` triple).
+
 The signed SPOT examples read `BITGET_SPOT_*` credentials (falling back
 to the generic `BITGET_*` triple). Run with `go run ./examples/<name>`.
 
