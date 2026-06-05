@@ -38,6 +38,14 @@ var (
 
 	// DefaultWsPrivateURL — production private WS endpoint (login required).
 	DefaultWsPrivateURL string = "wss://ws.bitget.com/v2/ws/private"
+
+	// DefaultWsPublicURLDemo — DEMO public WS endpoint (UTA paper trading).
+	// Reserved for the future UTA WS sub-phase; not wired by any client yet.
+	DefaultWsPublicURLDemo string = "wss://wspap.bitget.com/v3/ws/public"
+
+	// DefaultWsPrivateURLDemo — DEMO private WS endpoint (UTA paper trading).
+	// Reserved for the future UTA WS sub-phase; not wired by any client yet.
+	DefaultWsPrivateURLDemo string = "wss://wspap.bitget.com/v3/ws/private"
 )
 
 // Config — public SDK configuration. Pass to NewClient.
@@ -67,6 +75,14 @@ type Config struct {
 	// UserAgent — User-Agent value sent on REST requests. Default
 	// "go-bitget/1".
 	UserAgent string
+
+	// Demo — when true, every REST request carries the `paptrading: 1`
+	// header so Bitget routes it to the DEMO TRADING (paper) environment.
+	// Demo trading runs on the SAME production host with a dedicated Demo
+	// API Key (create one in the web UI under Demo mode). Available from
+	// v2.5; primarily for the UTA (V3) profile but applied transport-wide.
+	// WS demo (wss://wspap.bitget.com/...) is a separate, later concern.
+	Demo bool
 
 	// RateLimitObserver — legacy observer (endpoint, headers). Kept for
 	// source-level back-compat with the OKX-style pattern. nil → no-op.

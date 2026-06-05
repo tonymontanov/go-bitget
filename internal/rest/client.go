@@ -64,6 +64,9 @@ type Config struct {
 	// "zh-CN", "ja-JP" and a handful of others — the SDK defaults to
 	// "en-US" so error messages are English. Empty → header omitted.
 	Locale string
+	// Demo — when true, the transport adds `paptrading: 1` to every request
+	// so Bitget routes it to the demo (paper) trading environment.
+	Demo bool
 	// RateLimitObserver — legacy callback. Receives only (endpoint, headers).
 	// nil → no-op.
 	RateLimitObserver func(endpoint string, headers map[string]string)
@@ -158,6 +161,7 @@ type Client struct {
 	logger                 bglog.Logger
 	rateLimitObserver      func(endpoint string, headers map[string]string)
 	rateLimitEventObserver func(endpoint, method string, headers map[string]string, meta RequestMeta)
+	demo                   bool
 }
 
 // NewClient creates a REST client. signer may have empty credentials —
@@ -186,6 +190,7 @@ func NewClient(baseURL string, signer *auth.Signer, cfg Config, ua string, log b
 		logger:                 log,
 		rateLimitObserver:      cfg.RateLimitObserver,
 		rateLimitEventObserver: cfg.RateLimitEventObserver,
+		demo:                   cfg.Demo,
 	}
 }
 
@@ -368,6 +373,10 @@ func (c *Client) applyHeaders(req *http.Request, opts Options, method, body, sig
 	}
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.demo {
+		// Route to Bitget demo (paper) trading. Requires a Demo API Key.
+		req.Header.Set("paptrading", "1")
 	}
 
 	if !opts.Signed {

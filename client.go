@@ -92,6 +92,7 @@ func NewClient(cfg Config) (*Client, error) {
 		MaxIdleConnsPerHost: cfg.REST.MaxIdleConnsPerHost,
 		IdleConnTimeout:     cfg.REST.IdleConnTimeout,
 		Locale:              cfg.REST.Locale,
+		Demo:                cfg.Demo,
 		RateLimitObserver:   cfg.RateLimitObserver,
 	}
 	// Forward the typed event observer through a thin adapter. The
