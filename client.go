@@ -61,6 +61,12 @@ type Client struct {
 
 	copyTradingOnce sync.Once
 	copyTradingVal  any
+
+	convertOnce sync.Once
+	convertVal  any
+
+	earnOnce sync.Once
+	earnVal  any
 }
 
 // NewClient validates cfg, fills defaults, and returns a configured root
@@ -269,6 +275,54 @@ func (c *Client) CopyTrading() any {
 		c.copyTradingVal = copyTradingFactory(c)
 	})
 	return c.copyTradingVal
+}
+
+// convertFactory is set by convert.init() via RegisterConvertFactory.
+var convertFactory func(c *Client) any
+
+// RegisterConvertFactory wires the convert.Client builder. Idempotent.
+// Available from v2.5.
+func RegisterConvertFactory(f func(c *Client) any) {
+	if convertFactory == nil {
+		convertFactory = f
+	}
+}
+
+// Convert returns the *convert.Client (typed as any). nil when the
+// convert package has not been imported. Available from v2.5.
+func (c *Client) Convert() any {
+	c.convertOnce.Do(func() {
+		if convertFactory == nil {
+			c.logger.Warn(`bitget.Client.Convert: convert factory is not registered; available from v2.5`)
+			return
+		}
+		c.convertVal = convertFactory(c)
+	})
+	return c.convertVal
+}
+
+// earnFactory is set by earn.init() via RegisterEarnFactory.
+var earnFactory func(c *Client) any
+
+// RegisterEarnFactory wires the earn.Client builder. Idempotent.
+// Available from v2.5.
+func RegisterEarnFactory(f func(c *Client) any) {
+	if earnFactory == nil {
+		earnFactory = f
+	}
+}
+
+// Earn returns the *earn.Client (typed as any). nil when the earn
+// package has not been imported. Available from v2.5.
+func (c *Client) Earn() any {
+	c.earnOnce.Do(func() {
+		if earnFactory == nil {
+			c.logger.Warn(`bitget.Client.Earn: earn factory is not registered; available from v2.5`)
+			return
+		}
+		c.earnVal = earnFactory(c)
+	})
+	return c.earnVal
 }
 
 // Compile-time assertion: *Error implements the error interface.
