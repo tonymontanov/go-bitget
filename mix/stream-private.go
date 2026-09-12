@@ -62,6 +62,7 @@ package mix
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/shopspring/decimal"
@@ -604,13 +605,20 @@ type wsOrderRow struct {
 	AccBaseVolume bgcommon.FlexString `json:"accBaseVolume"`
 	PriceAvg      bgcommon.FlexString `json:"priceAvg"`
 	Fee           bgcommon.FlexString `json:"fee"`
-	FeeDetailRaw  string              `json:"feeDetail"`
-	MarginCoin    string              `json:"marginCoin"`
-	MarginMode    string              `json:"marginMode"`
-	Leverage      bgcommon.FlexString `json:"leverage"`
-	ReduceOnly    string              `json:"reduceOnly"`
-	CTime         bgcommon.FlexString `json:"cTime"`
-	UTime         bgcommon.FlexString `json:"uTime"`
+	// FeeDetailRaw — Bitget ships feeDetail on the orders channel either as a
+	// JSON string ("" / "{...}") or as an array of objects
+	// ([{"feeCoin":"USDT","fee":"0.00000000"}]) — the array form appeared on
+	// live USDT-FUTURES / spot pushes on 2026-09-12 and made every frame with
+	// a fee fail to decode ("expects \" or n, but found ["). Kept raw: the
+	// desk does not consume it, and a stricter type would reject one of the
+	// two shapes again.
+	FeeDetailRaw json.RawMessage     `json:"feeDetail"`
+	MarginCoin   string              `json:"marginCoin"`
+	MarginMode   string              `json:"marginMode"`
+	Leverage     bgcommon.FlexString `json:"leverage"`
+	ReduceOnly   string              `json:"reduceOnly"`
+	CTime        bgcommon.FlexString `json:"cTime"`
+	UTime        bgcommon.FlexString `json:"uTime"`
 }
 
 // wsPositionRow mirrors one element of the "positions" data array.

@@ -807,3 +807,74 @@ func TestContract_Spot_StreamPrivateValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestContract_Spot_WatchOrders_FeeDetailArray pins the live wire shape seen
+// on 2026-09-12: spot orders pushes carry feeDetail as an ARRAY of objects
+// ([{"feeCoin":"USDT","fee":"0.00000000"}]) as well as the documented
+// string forms. A string-typed field rejected the array and the desk lost
+// every frame that carried a fee.
+func TestContract_Spot_WatchOrders_FeeDetailArray(t *testing.T) {
+	var mock *streamMockServer = newStreamMockServer(t)
+	defer mock.close()
+
+	var c *Client = makePrivateStreamClient(t, mock)
+	defer func() { _ = c.Stream().Close() }()
+
+	var got = make(chan spottypes.OrderInfo, 4)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	var err error = c.Stream().WatchOrders(ctx, "BTCUSDT",
+		func(o spottypes.OrderInfo) {
+			select {
+			case got <- o:
+			default:
+			}
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("WatchOrders: %v", err)
+	}
+	select {
+	case <-mock.subs:
+	case <-time.After(time.Second):
+		t.Fatalf("subscribe not received")
+	}
+
+	for _, feeDetail := range []any{
+		[]map[string]any{{"feeCoin": "USDT", "fee": "0.00000000"}},
+		"",
+	} {
+		mock.pushFrame(t, "update", channelOrders, instIDDefaultPrivate,
+			[]map[string]any{{
+				"instId":        "BTCUSDT",
+				"orderId":       "ord-fee",
+				"clientOid":     "cli-fee",
+				"side":          "buy",
+				"orderType":     "limit",
+				"force":         "post_only",
+				"status":        "live",
+				"size":          "0.01",
+				"price":         "50000",
+				"notionalUsd":   "500",
+				"accBaseVolume": "0",
+				"priceAvg":      "0",
+				"fee":           "0",
+				"feeDetail":     feeDetail,
+				"cTime":         "1700000000000",
+				"uTime":         "1700000000050",
+			}}, 1700000000050)
+
+		select {
+		case o := <-got:
+			if o.OrderID != "ord-fee" || o.ClientOrderID != "cli-fee" {
+				t.Fatalf("ids: %#v", o)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("orders handler not invoked for feeDetail=%v", feeDetail)
+		}
+	}
+}

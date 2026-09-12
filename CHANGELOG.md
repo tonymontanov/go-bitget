@@ -4,6 +4,20 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.5.1 — 2026-09-12
+
+### Fixed
+
+- **`orders` channel (mix + spot): `feeDetail` array no longer breaks decoding.**
+  Live pushes carry `feeDetail` either as a JSON string (`""` / `"{...}"`) or as
+  an array of objects (`[{"feeCoin":"USDT","fee":"0.00000000"}]`). The wire
+  struct typed it as `string`, so every frame with a fee failed to decode
+  (`mix.wsOrderRow.FeeDetailRaw: ReadString: expects " or n, but found [`) and
+  the subscriber lost the whole orders channel while the `fill` channel kept
+  working (observed on USDT-FUTURES and spot, 2026-09-12). The field is now
+  `json.RawMessage`; contract tests pin both shapes
+  (`TestContract_WatchOrders_FeeDetailArray`, `TestContract_Spot_WatchOrders_FeeDetailArray`).
+
 ## v2.5.0 — Unreleased (full-exchange coverage)
 
 Work-in-progress line on branch `v2.5`, cut from `main` at the `v2.0.0`
