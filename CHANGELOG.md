@@ -96,6 +96,12 @@ of the existing REST core — plus V2 fixes surfaced by desk sessions.
   (`uta/stream_bench_test.go`) and a live unsigned integration test
   (`integration/uta_stream_test.go`, production + demo host).
 
+- **`utatypes.Instrument.PriceMultiplier` / `QuantityMultiplier`** — the venue's real price tick and
+  quantity step from `GET /api/v3/market/instruments`. They are not always `10^-precision`: on 2026-09-21
+  22 USDT-FUTURES symbols had a quantity step above it (SHIBUSDT `quantityPrecision=0`,
+  `quantityMultiplier=10000`; PEPEUSDT 1000; …), and the venue silently floors an order's quantity to the
+  step. Zero when the venue omits the field.
+
 ### Fixed
 
 - **WS login ack without `code` counts as success.** The V3 (UTA) endpoint omits

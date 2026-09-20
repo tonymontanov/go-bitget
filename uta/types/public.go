@@ -27,6 +27,17 @@ type Instrument struct {
 	QuantityPrecision int32
 	QuotePrecision    int32
 
+	// PriceMultiplier / QuantityMultiplier — the REAL price tick and
+	// quantity step. They are NOT always 10^-precision: on 2026-09-21
+	// 22 USDT-FUTURES symbols had a quantity step above it (SHIBUSDT:
+	// quantityPrecision=0 but quantityMultiplier=10000; PEPEUSDT 1000;
+	// NOT / ATH / SUN 10 ...). The venue silently floors an order's qty
+	// to the step, so sizing by precision alone sends a different
+	// quantity than intended. Zero when the venue omits the field
+	// (fall back to 10^-precision).
+	PriceMultiplier    decimal.Decimal
+	QuantityMultiplier decimal.Decimal
+
 	MinOrderQty       decimal.Decimal
 	MaxOrderQty       decimal.Decimal
 	MaxMarketOrderQty decimal.Decimal

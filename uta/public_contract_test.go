@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/shopspring/decimal"
+
 	utatypes "github.com/tonymontanov/go-bitget/v2/uta/types"
 )
 
@@ -75,7 +77,7 @@ func TestContract_Public_Instruments(t *testing.T) {
 	t.Parallel()
 	var sawCat string
 	var routes = map[string]string{
-		"/api/v3/market/instruments": `{"code":"00000","msg":"success","data":[{"symbol":"BTCUSDT","category":"USDT-FUTURES","baseCoin":"BTC","quoteCoin":"USDT","status":"online","pricePrecision":"1","quantityPrecision":"3","quotePrecision":"6","minOrderQty":"0.001","maxOrderQty":"1000","maxMarketOrderQty":"100","minOrderAmount":"5","buyLimitPriceRatio":"0.02","sellLimitPriceRatio":"0.02","makerFeeRate":"0.0002","takerFeeRate":"0.0006","symbolType":"perpetual","minLeverage":"1","maxLeverage":"125","fundInterval":"8","launchTime":"1600000000000","deliveryTime":"0"}]}`,
+		"/api/v3/market/instruments": `{"code":"00000","msg":"success","data":[{"symbol":"BTCUSDT","category":"USDT-FUTURES","baseCoin":"BTC","quoteCoin":"USDT","status":"online","pricePrecision":"1","quantityPrecision":"3","quotePrecision":"6","priceMultiplier":"0.1","quantityMultiplier":"0.001","minOrderQty":"0.001","maxOrderQty":"1000","maxMarketOrderQty":"100","minOrderAmount":"5","buyLimitPriceRatio":"0.02","sellLimitPriceRatio":"0.02","makerFeeRate":"0.0002","takerFeeRate":"0.0006","symbolType":"perpetual","minLeverage":"1","maxLeverage":"125","fundInterval":"8","launchTime":"1600000000000","deliveryTime":"0"}]}`,
 	}
 	var _, client = mockBitget(t, routes, func(t *testing.T, r *http.Request, body []byte) {
 		if r.URL.Path == "/api/v3/market/instruments" {
@@ -95,6 +97,9 @@ func TestContract_Public_Instruments(t *testing.T) {
 		t.Fatalf("want 1 instrument, got %d", len(insts))
 	}
 	var in = insts[0]
+	if !in.PriceMultiplier.Equal(decimal.RequireFromString("0.1")) || !in.QuantityMultiplier.Equal(decimal.RequireFromString("0.001")) {
+		t.Fatalf("multipliers: want 0.1 / 0.001, got %s / %s", in.PriceMultiplier, in.QuantityMultiplier)
+	}
 	if in.Symbol != "BTCUSDT" || in.PricePrecision != 1 || in.QuantityPrecision != 3 {
 		t.Fatalf("unexpected instrument: %+v", in)
 	}

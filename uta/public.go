@@ -89,6 +89,8 @@ type instrumentRow struct {
 	PricePrecision      string `json:"pricePrecision"`
 	QuantityPrecision   string `json:"quantityPrecision"`
 	QuotePrecision      string `json:"quotePrecision"`
+	PriceMultiplier     string `json:"priceMultiplier"`
+	QuantityMultiplier  string `json:"quantityMultiplier"`
 	MinOrderQty         string `json:"minOrderQty"`
 	MaxOrderQty         string `json:"maxOrderQty"`
 	MaxMarketOrderQty   string `json:"maxMarketOrderQty"`
@@ -156,6 +158,8 @@ func (p *PublicClient) GetInstruments(ctx context.Context, category utatypes.Cat
 			dst *decimal.Decimal
 			raw string
 		}{
+			{&inst.PriceMultiplier, r.PriceMultiplier},
+			{&inst.QuantityMultiplier, r.QuantityMultiplier},
 			{&inst.MinOrderQty, r.MinOrderQty},
 			{&inst.MaxOrderQty, r.MaxOrderQty},
 			{&inst.MaxMarketOrderQty, r.MaxMarketOrderQty},
