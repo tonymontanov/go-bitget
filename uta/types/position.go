@@ -13,7 +13,18 @@ package types
 
 import "github.com/shopspring/decimal"
 
-// CurrentPosition — one open position (position/current-position).
+// CurrentPosition — one open position (position/current-position, and the
+// rows of the private WS `position` topic via
+// uta.StreamClient.WatchPositions).
+//
+// WS NOTES:
+//   - The WS row carries NO category per the venue docs — Category stays
+//     empty on WS rows (it is filled, upper-cased, only if the venue ever
+//     sends it). Match WS positions by Symbol (+ PosSide in hedge mode).
+//   - Total carries the WS `size`; LiquidationPrice the WS `liqPrice`;
+//     TotalFunding the WS `totalFundingFee`.
+//   - A closed position arrives as a row with Total = 0 and
+//     PositionStatus = "ended".
 type CurrentPosition struct {
 	Category         string
 	Symbol           string
@@ -40,6 +51,10 @@ type CurrentPosition struct {
 	CloseFeeTotal    decimal.Decimal
 	CreatedTime      int64
 	UpdatedTime      int64
+
+	// MarginSize — WS-only: margin allocated to the position (WS
+	// `marginSize`). Zero on REST rows (REST reports PositionBalance).
+	MarginSize decimal.Decimal
 }
 
 // PositionHistory — one closed position (position/history-position).

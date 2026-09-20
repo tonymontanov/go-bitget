@@ -4,7 +4,8 @@ FILE: uta/client.go
 DESCRIPTION:
 Root client for the Bitget V3 UTA profile. Holds a reference to the parent
 bitget.Client (REST, signer, logger, config) and exposes the category
-sub-clients — Public, Account, Trade, Position, Strategy.
+sub-clients — Public, Account, Trade, Position, Strategy — plus the
+WebSocket Stream sub-client.
 */
 
 package uta
@@ -24,6 +25,7 @@ type Client struct {
 	trade    *TradeClient
 	position *PositionClient
 	strategy *StrategyClient
+	stream   *StreamClient
 }
 
 // NewClient creates a UTA profile client off the given parent. Returns nil
@@ -39,6 +41,7 @@ func NewClient(parent *bitget.Client) *Client {
 	c.trade = newTradeClient(c)
 	c.position = newPositionClient(c)
 	c.strategy = newStrategyClient(c)
+	c.stream = newStreamClient(c)
 	return c
 }
 
@@ -60,8 +63,16 @@ func (c *Client) Position() *PositionClient { return c.position }
 // Strategy returns the plan-order sub-client (/api/v3/trade/*-strategy-*).
 func (c *Client) Strategy() *StrategyClient { return c.strategy }
 
-// Internal shortcut shared by the sub-clients.
+// Stream returns the V3 WebSocket sub-client (public market data + the
+// private order / fill / position / account topics). Construction is
+// free: connections are dialled lazily by the first Watch* call.
+func (c *Client) Stream() *StreamClient { return c.stream }
+
+// Internal shortcuts shared by the sub-clients.
 func (c *Client) rest() bgcommon.RestDoer { return c.parent.REST() }
+func (c *Client) logger() bitget.Logger   { return c.parent.Logger() }
+func (c *Client) config() bitget.Config   { return c.parent.Config() }
+func (c *Client) signerEnabled() bool     { return c.parent.Signer().Enabled() }
 
 // init registers the factory in the root package so that
 // bitget.Client.UTA() lazily returns *uta.Client. A blank import of

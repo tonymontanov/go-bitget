@@ -22,10 +22,22 @@ type AccountAsset struct {
 	Available decimal.Decimal
 	Debt      decimal.Decimal
 	Locked    decimal.Decimal
+
+	// WS-only fields (zero on REST rows).
+
+	// Borrow — borrowed amount (WS `borrow`).
+	Borrow decimal.Decimal
+	// Bonus — USDT bonus amount (WS `bonus`).
+	Bonus decimal.Decimal
 }
 
 // AccountAssets — GET account/assets: the unified-account equity overview
-// plus the per-coin breakdown.
+// plus the per-coin breakdown. Also delivered by the private WS `account`
+// topic via uta.StreamClient.WatchAccount.
+//
+// WS NOTES: AccountEquity carries the WS `totalEquity`, Assets the WS
+// `coin[]` list (per-coin Debt = WS `debts`). The WS row has no
+// USDT / BTC equity or per-currency PnL breakdown — those stay zero.
 type AccountAssets struct {
 	AccountEquity     decimal.Decimal
 	USDTEquity        decimal.Decimal
