@@ -546,7 +546,15 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 				bglog.Str("code", env.Code.String()))
 			continue
 		}
-		if env.Event == "login" && env.Code == "0" {
+		// Success = event "login" with code 0 OR with no code at all. The
+		// V3 (UTA) endpoint omits `code` on its subscribe acks (captured
+		// live 2026-09-21: {"event":"subscribe","arg":{...},"connId":"..."}),
+		// and its login ack could not be captured without a UTA key — a
+		// strict `code == "0"` would then turn a successful login into an
+		// endless "login rejected" reconnect loop. Accepting the code-less
+		// form is safe: the venue reports a REJECTED login as a separate
+		// frame {"event":"error","code":"30005",...}, never as event=login.
+		if env.Event == "login" && (env.Code == "0" || env.Code == "") {
 			c.logger.Info("ws: login ok")
 			return nil
 		}

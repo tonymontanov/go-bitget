@@ -98,6 +98,13 @@ of the existing REST core — plus V2 fixes surfaced by desk sessions.
 
 ### Fixed
 
+- **WS login ack without `code` counts as success.** The V3 (UTA) endpoint omits
+  `code` on its acks (live subscribe ack: `{"event":"subscribe","arg":{…},"connId":"…"}`);
+  the private login ack could not be captured without a UTA key, and a strict
+  `code == "0"` would turn a successful login into an endless "login rejected"
+  reconnect loop. `event=login` with code `0` OR no code is now success; a
+  rejected login still arrives as `{"event":"error","code":"30005",…}`
+  (`TestConnPrivateLoginAckWithoutCode`, `TestConnPrivateLoginRejected`).
 - **mix `GetOrderBook`: levels decode on the live wire.** `/api/v2/mix/market/merge-depth`
   ships `asks` / `bids` as bare JSON numbers (`[[81241.3,6.4858],…]`), not the
   quoted strings the docs show. The payload was typed `[][]string`, so EVERY call

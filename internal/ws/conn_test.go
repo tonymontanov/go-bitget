@@ -56,6 +56,10 @@ type mockServer struct {
 	// push frames from the test goroutine must take the same lock the
 	// handle() goroutine uses for ack writes.
 	writeMu sync.Mutex
+	// loginAck — the frame sent back on a login op. Empty → the classic
+	// {"event":"login","code":"0"}. Tests override it to exercise the
+	// code-less V3 form and the rejection frame.
+	loginAck string
 }
 
 func newMockServer(t *testing.T) *mockServer {
@@ -115,7 +119,11 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 		case "login":
 			m.logins <- struct{}{}
 			m.writeMu.Lock()
-			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"login","code":"0"}`))
+			var ack string = m.loginAck
+			if ack == "" {
+				ack = `{"event":"login","code":"0"}`
+			}
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(ack))
 			m.writeMu.Unlock()
 		case "subscribe":
 			var i int
@@ -243,6 +251,83 @@ func TestConnPrivateLogin(t *testing.T) {
 	case <-srv.logins:
 	case <-time.After(2 * time.Second):
 		t.Fatal("login op not received by server")
+	}
+}
+
+// privateTestConfig is the Config shared by the login-ack tests below.
+func privateTestConfig(url string, onConnect func(bool)) Config {
+	return Config{
+		URL:                     url,
+		IsPrivate:               true,
+		HandshakeTimeout:        2 * time.Second,
+		ReadTimeout:             3 * time.Second,
+		WriteTimeout:            2 * time.Second,
+		LoginTimeout:            2 * time.Second,
+		PingInterval:            500 * time.Millisecond,
+		ReconnectInitialBackoff: 30 * time.Millisecond,
+		ReconnectMaxBackoff:     100 * time.Millisecond,
+		OnConnect:               onConnect,
+	}
+}
+
+// TestConnPrivateLoginAckWithoutCode — the V3 endpoint omits `code` on
+// its acks; a code-less {"event":"login"} must count as a successful
+// login (OnConnect fires), not as a rejection.
+func TestConnPrivateLoginAckWithoutCode(t *testing.T) {
+	var srv *mockServer = newMockServer(t)
+	srv.loginAck = `{"event":"login","msg":"","connId":"0649f8fffee700ab"}`
+	defer srv.close()
+
+	var connected chan bool = make(chan bool, 4)
+	var c *Conn = NewConn(privateTestConfig(srv.wsURL(), func(reconnect bool) { connected <- reconnect }),
+		auth.NewSigner("k", "s", "p"), nil, nil)
+	defer c.Close()
+
+	var ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	c.Start(ctx)
+
+	select {
+	case reconnect := <-connected:
+		if reconnect {
+			t.Fatal("first connection reported as reconnect")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("code-less login ack was not accepted: OnConnect never fired")
+	}
+}
+
+// TestConnPrivateLoginRejected — a rejected login arrives as
+// {"event":"error",...}; the conn must NOT report itself connected and
+// must keep retrying the login.
+func TestConnPrivateLoginRejected(t *testing.T) {
+	var srv *mockServer = newMockServer(t)
+	srv.loginAck = `{"event":"error","code":"30005","msg":"error"}`
+	defer srv.close()
+
+	var connected chan bool = make(chan bool, 4)
+	var c *Conn = NewConn(privateTestConfig(srv.wsURL(), func(reconnect bool) { connected <- reconnect }),
+		auth.NewSigner("k", "s", "p"), nil, nil)
+	defer c.Close()
+
+	var ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	c.Start(ctx)
+
+	var i int
+	for i = 0; i < 2; i++ {
+		select {
+		case <-srv.logins:
+		case <-connected:
+			t.Fatal("OnConnect fired although the login was rejected")
+		case <-time.After(2 * time.Second):
+			t.Fatalf("login attempt #%d not seen: the conn stopped retrying", i+1)
+		}
+	}
+	select {
+	case <-connected:
+		t.Fatal("OnConnect fired although the login was rejected")
+	default:
 	}
 }
 
