@@ -581,6 +581,23 @@ subscribe sent but the snapshot never arrives" (venue subscribe rate limit
 between socket publish and the login write goes out pre-login (pre-existing
 V2 behaviour; self-heals through the login-rejected → reconnect path).
 
+**Follow-ups landed after Phase 9 (2026-09-21, same branch).**
+- `internal/ws` login ack: `event=login` with code `0` OR with NO code is success
+  (V3 omits `code` on its acks; a rejection arrives as `event=error`). Guards the
+  first live private run against an endless "login rejected" loop.
+- `utatypes.Instrument.PriceMultiplier / QuantityMultiplier` — the venue's real tick /
+  quantity step. 22 USDT-FUTURES symbols have a step above `10^-quantityPrecision`
+  (SHIBUSDT 10000 …); the venue silently floors quantity to the step.
+- Desk-connector gaps reported while wiring `uta` into the trading core, NOT done yet:
+  (a) the REST client forwards only `X-RateLimit-*` / `Retry-After`; V3 reports the
+  remaining quota in `x-mbx-used-remain-limit`, so the desk limiter has no live V3
+  header state; (b) no API to force a private-socket reconnect (the desk's
+  `PrivateStreamResetter` cannot be implemented); (c) reconnect hooks run on the
+  supervisor goroutine and must not block — a blocking-safe variant (or a reset event
+  on the reader goroutine) would let the desk deliver its StreamReset from one
+  goroutine; (d) `doBatch` tags close-positions / cancel-symbol-order as category
+  "cancel"; (e) batch row decoder reads only `code` / `msg`.
+
 ### 📋 Planned
 
 - **`v2.5` / `v2.6` follow-ups** — the V3 re-issues not in the core: wallet /
