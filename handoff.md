@@ -10,8 +10,9 @@
 > internal context.
 
 Module path: `github.com/tonymontanov/go-bitget/v2`
-Last tagged release: **`v2.0.0`** (SPOT GA). Active dev branch: **`v2.5`**
-(full-exchange coverage; see Roadmap).
+Last tagged release: **`v2.0.0`** (SPOT GA). Active dev branches: **`v2.5`**
+(full-exchange coverage) and **`uta-account`** (`v2.6.0` line — V3 / UTA
+WebSocket + desk-connector gaps; see Roadmap).
 
 ---
 
@@ -88,9 +89,14 @@ go-bitget/
     bgerr/     — Error / ErrorKind / MapBitgetCode / MapHTTPStatus (~115 V2 codes)
     bglog/     — Logger interface, Field, NoopLogger
     bgmet/     — Counter / CounterFactory, NoopMetrics
-    codec/     — jsoniter wrappers + ParseDecimal / ParseInt64 / RawJSON
+    codec/     — jsoniter wrappers + ParseDecimal / ParseInt64 / RawJSON;
+                 wire.go — allocation-light WS field types (WireDecimal / WireInt64 /
+                 WireLevels / WireToken, registered jsoniter type decoders) + UnmarshalWire
+                 (case-sensitive keys, no per-key allocation). Used by uta/ hot decoders.
     rest/      — low-level HTTP client; Bitget envelope {code,msg,data,requestTime}; ACCESS-* headers; rate-limit observers
-    ws/        — Conn: connect / login / plain-text ping / reconnect+jitter / resubscribe / dispatch
+    ws/        — Conn: connect / login / plain-text ping / reconnect+jitter / resubscribe / dispatch;
+                 SubscriptionArg carries BOTH V2 (channel/instId/coin) and V3 (topic/symbol)
+                 coordinates; Config.OnConnect(reconnect bool) hook
     bgcommon/  — domain-agnostic helpers shared by profiles:
                    pagination.go  (PaginateByCursor[T] — idLessThan cursor protocol)
                    batch.go       (BatchEnvelope / ValidateBatchSize)
@@ -133,7 +139,14 @@ go-bitget/
                          STPMode, MarginAsset, AccountUpdate, records: Borrow/Repay/Interest/
                          Liquidation/Financial, Currency, MaxBorrowable, MaxTransferOut)
 
-  uta/                 # v2.5 — V3 Unified Trading Account (core done: Public/Account/Trade/Position/Strategy)
+  uta/                 # v2.5 — V3 Unified Trading Account (REST core: Public/Account/Trade/Position/Strategy)
+    stream.go          — v2.6: V3 WS sub-client: lazy public/private conns, MULTI-HANDLER FAN-OUT
+                         (N Watch* of one wire arg share one subscription), WatchTicker / WatchPublicTrades,
+                         OnPublicReconnect / OnPrivateReconnect
+    stream-book.go     — WatchOrderBook: books1/5/50 stateless + `books` local incremental book
+                         (seq/pseq chain, no checksum on V3, resync on gap)
+    stream-private.go  — account-wide order / fill / position / account topics (instType "UTA")
+    types/stream.go    — TickerUpdate / PublicTradeUpdate / OrderBookUpdate
   examples/            # runnable demos. MIX: marketdata / place-order /
                        #   private-stream. SPOT: spot-marketdata /
                        #   spot-place-order / spot-private-stream /
@@ -219,6 +232,8 @@ Agreed phase order:
 | 5 | `broker/` (Agent) | ✅ done (this session) |
 | 6 | Common / public utilities round-out | ✅ done (this session) |
 | 7 | `uta/` — V3 Unified Trading Account (core: Public+Account+Trade+Position+Strategy; hedge mode, demo header) | ✅ done (this session) |
+| 8 | Live / DEMO integration suite (`integration/`, build tag `integration`) | ✅ unsigned; signed needs the owner's Demo key |
+| 9 | **V3 WebSocket (public + private)** — `uta.StreamClient` (branch `uta-account`, `v2.6.0` line) | ✅ done 2026-09-21; public verified live, **private verified against docs only — needs a live UTA/Demo key run** |
 
 **Phase 1 — done (futures completeness).** Audit confirmed every `mix/`
 REST/WS path already routes `productType` / `marginCoin` through the
@@ -513,16 +528,68 @@ owner's Demo key, signed tests written and ready): (3) the V3 batch
 place/cancel response shape on a real key (TestLive_UTA_Paper*); (4)
 `account/info` (`GetInfo`) field set (TestLive_UTA_AccountAssetsSettings).
 
+**Phase 9 — V3 WebSocket (public + private) — done (2026-09-21, branch
+`uta-account`, `v2.6.0` line).** `uta.Client.Stream()` → `uta.StreamClient`
+(`uta/stream.go`, `stream-book.go`, `stream-private.go`).
+
+- **Wire.** V3 args are `{instType, topic, symbol}`: lower-case category on
+  public topics (`usdt-futures`), literal `UTA` and NO symbol on the private
+  ones (account-wide). `internal/ws.SubscriptionArg` carries both coordinate
+  sets (`omitempty`; V2 bytes pinned by test), V3 registry key
+  `v3:instType:topic:symbol`. Endpoints: `Config.WS.UTAPublicURL` /
+  `UTAPrivateURL` → `DefaultWsUTAPublicURL` / `DefaultWsUTAPrivateURL`, or the
+  `wspap` demo pair when `Config.Demo` (left EMPTY by `DefaultConfig()` — the
+  default depends on `Demo`, resolved in `NewClient`). Login = V2 login,
+  timestamp in SECONDS (V3 docs text says ms; their samples + the reference
+  client say seconds).
+- **Public.** `WatchTicker`, `WatchPublicTrades` (history `snapshot` skipped,
+  oldest-first delivery), `WatchOrderBook` (depth ≤1/≤5/≤50 → stateless
+  `books1/5/50`; >50 → `books` local incremental book). V3 has NO checksum:
+  integrity = `pseq == last seq`; gap / `pseq=0` / update-before-snapshot →
+  drop book, ONE error wrapping `uta.ErrOrderBookResync`, resubscribe
+  (debounced). The shared V2 `bgcommon/orderbook.Engine` is deliberately NOT
+  reused (CRC-centric, truncates stored state, no seq validation). Live
+  soak 2026-09-21 (60 s each, BTCUSDT futures + spot, PARTIUSDT): local
+  top-50 == venue `books50` at every matching `seq`, zero gaps; the `books`
+  feed is a 1000-level WINDOW diff (stored side stays at 1000 levels).
+- **Private.** `WatchOrders` / `WatchFills` / `WatchPositions` /
+  `WatchAccount` deliver the REST types (extended additively; WS `category`
+  upper-cased to match REST / the enum). Tolerant decode (`wsText` for every
+  scalar, raw `feeDetail`, WS + REST spellings).
+- **Fan-out in the SDK.** N `Watch*` of one wire arg share ONE wire
+  subscription; per-handler ctx detach; wire unsubscribe with the last
+  handler; copy-on-write handler slice (lock-free, zero-alloc dispatch). A
+  handler joining a live topic does NOT get the venue's initial
+  position / account snapshot — seed from REST.
+- **Reconnect callbacks.** `OnPublicReconnect` / `OnPrivateReconnect` ride the
+  new `ws.Config.OnConnect(reconnect bool)`; never fired for the first connect.
+- **Hot path.** `internal/codec/wire.go` (`WireDecimal` / `WireInt64` /
+  `WireLevels` / `WireToken` + `UnmarshalWire`): ticker 62 → 16 allocs/frame,
+  books5 112 → 41 (floor = the `big.Int` in each decimal). Benchmarks:
+  `uta/stream_bench_test.go`.
+- **Tests.** Mock-WS contract tests (public + private), local-book unit tests
+  with a randomised reference model, benchmarks, live unsigned
+  `integration/uta_stream_test.go` (prod + demo host, green 2026-09-21).
+
+**Open items (Phase 9):** (1) **private V3 channels verified against docs only
+— needs a live UTA/Demo key run** (login ack shape on `/v3/ws/private`,
+`order` / `fill` / `position` / `account` row shapes, whether `account`
+`update` pushes list all coins or only changed ones, whether the position /
+account snapshot is re-sent after a resubscribe); (2) no watchdog for "resync
+subscribe sent but the snapshot never arrives" (venue subscribe rate limit
+240/h/conn) — same as mix; (3) `ws.Conn.Subscribe` issued in the few µs
+between socket publish and the login write goes out pre-login (pre-existing
+V2 behaviour; self-heals through the login-rejected → reconnect path).
+
 ### 📋 Planned
 
-- **`v2.5` follow-ups** — the V3 re-issues not in the core: wallet /
+- **`v2.5` / `v2.6` follow-ups** — the V3 re-issues not in the core: wallet /
   transfer / deposit / withdraw, V3 user sub-accounts, V3 tax, V3 broker,
-  ins-loan, V3 crypto-loan, V3 earn-elite, V3 copy-futures — plus the V3
-  **WebSocket** (public/private streams + WS trading, incl. the `wspap`
-  demo hosts). Each: two-layer (lift shared into `bgcommon`), contract
-  tests at parity, then a review pause. `uta/` is additive and must not
-  change V2 behaviour; `WatchPositions` stays mix-only by venue contract
-  until UTA reintroduces unified positions over WS.
+  ins-loan, V3 crypto-loan, V3 earn-elite, V3 copy-futures — plus V3
+  **WebSocket order entry** (place / cancel over WS) and the remaining V3
+  public topics (candles). Each: two-layer (lift shared into `bgcommon`),
+  contract tests at parity, then a review pause. `uta/` is additive and must
+  not change V2 behaviour.
 
 ---
 
@@ -584,10 +651,14 @@ read env vars; the *consumer* sources them.
 | REST | `https://api.bitget.com` |
 | WS public | `wss://ws.bitget.com/v2/ws/public` |
 | WS private (login required) | `wss://ws.bitget.com/v2/ws/private` |
+| WS UTA / V3 public | `wss://ws.bitget.com/v3/ws/public` (demo: `wss://wspap.bitget.com/v3/ws/public`) |
+| WS UTA / V3 private (login required) | `wss://ws.bitget.com/v3/ws/private` (demo: `wss://wspap.bitget.com/v3/ws/private`) |
 
 A single private WS endpoint serves all contract types (auth is per-UID,
-not per-product). Testnet/demo hosts are **not** shipped — deferred to v2.5.
-Endpoint vars are overridable (tests point them at a mock server).
+not per-product). The V2 endpoints have no demo host; the UTA / V3 pair
+(`Config.WS.UTAPublicURL` / `UTAPrivateURL`) switches to `wspap.bitget.com`
+when `Config.Demo` is set and the fields are empty. Endpoint vars are
+overridable (tests point them at a mock server).
 
 **Key tunables (HFT-relevant defaults):** REST timeout 10s; WS read 35s /
 write 5s / ping 20s / login 30s; reconnect backoff 200ms→10s with 0.2
@@ -598,8 +669,9 @@ jitter; WS read/write buffers 64KB/16KB; orderbook max depth 200.
 - REST: `ACCESS-KEY` / `ACCESS-SIGN` / `ACCESS-TIMESTAMP` (**milliseconds**)
   / `ACCESS-PASSPHRASE` headers; `sign = base64(HMAC_SHA256(secret,
   timestamp + method + requestPath + body))`.
-- WS login (**timestamp in SECONDS**, 10 digits — Bitget V2 WS deviates
-  from its own REST ms convention):
+- WS login, V2 AND V3 (**timestamp in SECONDS**, 10 digits — Bitget WS
+  deviates from its own REST ms convention; the V3 docs text says ms but
+  their samples and the reference client use seconds):
   `sign = base64(HMAC_SHA256(secret, timestamp + "GET" + "/user/verify"))`.
 
 ### Consumer env vars

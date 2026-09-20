@@ -10,6 +10,92 @@ Work-in-progress line on branch `uta-account`. Goal: make the V3 UTA profile
 usable by a trading connector end to end — public and private WebSocket on top
 of the existing REST core — plus V2 fixes surfaced by desk sessions.
 
+### Added
+
+- **`uta.StreamClient` — V3 (UTA) WebSocket, public + private.** Reached via
+  `uta.Client.Stream()`; two lazy connections (first public / first private
+  `Watch*`) on the new endpoints, root `Config.WS` timeouts, transparent
+  reconnect / relogin / resubscribe through `internal/ws`.
+  - **Public** (`category` + `symbol`; wire `instType` = lower-case category,
+    `MARGIN` / empty rejected client-side): `WatchTicker` (`ticker` →
+    `utatypes.TickerUpdate`; mark / index / funding zero on spot),
+    `WatchPublicTrades` (`publicTrade` → `utatypes.PublicTradeUpdate`; the
+    history `snapshot` frame sent on subscribe is **skipped**, a multi-trade
+    frame is delivered **oldest first** — the venue lists newest first),
+    `WatchOrderBook` (`utatypes.OrderBookUpdate`, always the full top-of-book
+    view): depth ≤1 / ≤5 / ≤50 → the stateless `books1` / `books5` / `books50`
+    topics, depth > 50 → `books` kept as a **local incremental book**. V3 ships
+    no checksum; integrity is the `seq` / `pseq` chain (`pseq` must equal the
+    last applied `seq`; size `0` deletes). A gap, `pseq = 0` on an update or an
+    update before the snapshot drops the book, surfaces ONE error wrapping the
+    new `uta.ErrOrderBookResync` and resubscribes (unsubscribe → 50 ms →
+    subscribe, de-duplicated). The book keeps every level the venue sent and
+    truncates only the delivered view. Wire shapes verified against live frames
+    (2026-09-21); `books15` / `books200` do not exist on V3.
+  - **Private** (account-wide: `{"instType":"UTA","topic":"order"|"fill"|
+    "position"|"account"}`, no symbol — every category / symbol is delivered):
+    `WatchOrders` / `WatchFills` / `WatchPositions` / `WatchAccount` deliver
+    the REST domain types, one call per row. Missing credentials →
+    `ErrorKindAuth` before dialling. Login is the V2 one (timestamp in
+    **seconds**; the V3 docs text says ms, their samples and the reference
+    client say seconds). **Implemented from the docs only — no UTA key was
+    available**; decoding is deliberately tolerant (any scalar type per field,
+    `feeDetail` as array / object / string / null never drops a row, WS and REST
+    field spellings both read).
+  - **Multi-handler fan-out inside the SDK.** Any number of `Watch*` calls for
+    the same wire arg share ONE wire subscription; each handler detaches with
+    its own `ctx` (nil → until `Close`), the wire unsubscribe goes out with the
+    last one. Handlers run in registration order on the read goroutine; the
+    handler list is copy-on-write behind an atomic pointer (no lock, no
+    allocation per frame). Two `WatchOrderBook` callers on one topic get their
+    own depth each.
+  - **`OnPublicReconnect` / `OnPrivateReconnect`** — callbacks fired after every
+    successful RE-connect (login ok + resubscribe sent), never on the first
+    connect; return a remove func.
+- **Domain types.** New `uta/types/stream.go` (`TickerUpdate`,
+  `PublicTradeUpdate`, `OrderBookUpdate`). REST types extended additively for
+  the WS rows: `Order` (+`TradeSide`, `MarginMode`, `MarginCoin`, `Leverage`,
+  `TotalProfit`; WS `holdSide` → `PosSide`), `Fill` (+`ClientOID`, `ExecTime`,
+  `PosSide`, `IsRPI`, `ExecLinkID`; `CreatedTime` falls back to `ExecTime`),
+  `CurrentPosition` (+`MarginSize`; WS `size` → `Total`, `liqPrice` →
+  `LiquidationPrice`, `totalFundingFee` → `TotalFunding`; the WS row has no
+  category), `AccountAsset` (+`Borrow`, `Bonus`; WS `totalEquity` →
+  `AccountEquity`, `coin[]` → `Assets`). WS `category` is normalised to the
+  canonical upper-case form (`usdt-futures` → `USDT-FUTURES`) so it compares
+  equal to the REST rows and the `Category` constants.
+- **Config: `WS.UTAPublicURL` / `WS.UTAPrivateURL`** with the new constants
+  `DefaultWsUTAPublicURL` / `DefaultWsUTAPrivateURL`
+  (`wss://ws.bitget.com/v3/ws/public|private`). Empty + `Config.Demo` → the
+  `wspap.bitget.com` demo pair (`DefaultWsPublicURLDemo` /
+  `DefaultWsPrivateURLDemo`, now wired). `DefaultConfig()` leaves both empty on
+  purpose so that setting `Demo` after `DefaultConfig()` still selects the demo
+  host; `NewClient` resolves them.
+- **`internal/ws`: V3 coordinates + connect hook (backwards compatible).**
+  `SubscriptionArg` gained `Topic` / `Symbol` (`omitempty` — V2 frames marshal
+  byte-identically, pinned by `TestSubscriptionArgV2MarshalUnchanged`);
+  `Key()` returns `v3:instType:topic:symbol` when `Topic` is set, the V2 key is
+  unchanged; `Envelope.IsPush` / `Conn.Subscribe` accept channel OR topic;
+  control-frame debug logs print topic / symbol. New `Config.OnConnect
+  func(reconnect bool)`, invoked synchronously after dial (+login) and the
+  resubscribe write, before the read loop starts.
+- **`internal/codec/wire.go` — allocation-light WS field types.**
+  `WireDecimal` / `WireInt64` / `WireLevels` / `WireToken` are decoded by
+  registered jsoniter type decoders straight from the iterator buffer (no
+  intermediate strings; shared zero decimals for the `"0"` sizes of book
+  deletes), `UnmarshalWire` matches object keys case-sensitively so jsoniter
+  stops allocating every key. Ticker frame 62 → 16 allocs, books5 frame 112 →
+  41 (what remains is the `big.Int` inside each `decimal`). V2 decode paths
+  are untouched.
+- **Tests.** Contract tests against a mock V3 WS server
+  (`uta/stream_contract_test.go`, `uta/stream_private_contract_test.go`: exact
+  subscribe args, login before subscribe, every live fixture, publicTrade
+  snapshot skip + ordering, books5 stateless, incremental book apply / delete /
+  gap → error + resubscribe, fan-out attach / detach, reconnect callbacks,
+  feeDetail shapes, numbers-for-strings), local-book unit tests incl. a
+  randomised reference-model check (`uta/stream_book_test.go`), benchmarks
+  (`uta/stream_bench_test.go`) and a live unsigned integration test
+  (`integration/uta_stream_test.go`, production + demo host).
+
 ### Fixed
 
 - **mix `GetOrderBook`: levels decode on the live wire.** `/api/v2/mix/market/merge-depth`
