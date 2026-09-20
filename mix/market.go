@@ -16,12 +16,15 @@ Implements:
 
 BITGET MIX SPECIFICS:
 
-  - /merge-depth uses NAMED depth limits ("max15", "max50", "max100",
-    "max200") instead of integers. The SDK clamps the caller's
-    requested depth to the closest preset; depth ≤ 0 resolves to
-    "max50" (the SDK default). The "precision" parameter is pinned
-    to "scale0" (smallest tick) — that's what every market-making
-    workflow needs; configurable presets can be exposed later.
+  - /merge-depth accepts `limit` = 1 / 5 / 15 / 50 / max and silently
+    falls back to the default 100 rows on anything else. The SDK
+    clamps the caller's requested depth to the smallest value that
+    covers it ("max" above 50); depth ≤ 0 resolves to "50" (the SDK
+    default). Levels arrive as bare JSON NUMBERS, not quoted strings
+    — decoded via bgcommon.FlexString. The "precision" parameter is
+    pinned to "scale0" (smallest tick) — that's what every
+    market-making workflow needs; configurable presets can be
+    exposed later.
 
   - /candles returns klines ASCENDING by openTime (oldest first),
     confirmed against the V2 docs. The SDK preserves this order so
@@ -222,24 +225,35 @@ func decimalScale(base int64, exp int) decimal.Decimal {
 // Order book snapshot.
 // ---------------------------------------------------------------------
 
-// orderbookDepthPresets maps an upper-bound depth (>=15..200) to the
-// Bitget /merge-depth `limit` keyword. Sorted ascending by depth so a
-// linear scan picks the closest preset.
+// orderbookDepthPresets maps an upper-bound depth to the Bitget
+// /merge-depth `limit` value. The venue accepts exactly 1 / 5 / 15 / 50
+// / max (verified live 21.09.2026); ANY other value — including the
+// "max15" / "max50" spellings this SDK used before — is silently
+// ignored and the default 100 rows come back. Sorted ascending by depth
+// so a linear scan picks the closest preset.
 var orderbookDepthPresets = []struct {
 	maxRows int
 	keyword string
 }{
-	{15, "max15"},
-	{50, "max50"},
-	{100, "max100"},
-	{200, "max200"},
+	{1, "1"},
+	{5, "5"},
+	{15, "15"},
+	{50, "50"},
 }
 
-// resolveDepth picks the closest Bitget depth keyword for the requested
-// row count. depth ≤ 0 → "max50".
+// orderbookDepthMax is the `limit` value for "everything the venue will
+// give" (100 rows on USDT-FUTURES at scale0).
+const orderbookDepthMax = "max"
+
+// orderbookDepthDefault is what depth ≤ 0 resolves to.
+const orderbookDepthDefault = "50"
+
+// resolveDepth picks the closest Bitget depth value for the requested
+// row count: the smallest preset that covers it, "max" above 50.
+// depth ≤ 0 → "50".
 func resolveDepth(depth int) string {
 	if depth <= 0 {
-		return "max50"
+		return orderbookDepthDefault
 	}
 	var i int
 	for i = 0; i < len(orderbookDepthPresets); i++ {
@@ -247,21 +261,24 @@ func resolveDepth(depth int) string {
 			return orderbookDepthPresets[i].keyword
 		}
 	}
-	return orderbookDepthPresets[len(orderbookDepthPresets)-1].keyword
+	return orderbookDepthMax
 }
 
-// orderbookPayload mirrors the data field of /merge-depth.
+// orderbookPayload mirrors the data field of /merge-depth. Levels are
+// FlexString: the live wire ships bare JSON numbers
+// ([[81241.3,6.4858],...]) while the docs show quoted strings; both
+// must decode (a [][]string field made every call fail to parse).
 type orderbookPayload struct {
-	Asks      [][]string `json:"asks"`
-	Bids      [][]string `json:"bids"`
-	Ts        string     `json:"ts"`
-	Precision string     `json:"precision"`
-	Scale     string     `json:"scale"`
+	Asks      [][]bgcommon.FlexString `json:"asks"`
+	Bids      [][]bgcommon.FlexString `json:"bids"`
+	Ts        string                  `json:"ts"`
+	Precision string                  `json:"precision"`
+	Scale     string                  `json:"scale"`
 }
 
 // GetOrderBook returns a depth snapshot for `symbol`. depth is clamped
-// to Bitget's named presets (max15 / max50 / max100 / max200); depth ≤
-// 0 resolves to max50, the SDK default.
+// to the venue's accepted limits (1 / 5 / 15 / 50 / max); depth ≤ 0
+// resolves to 50, the SDK default.
 func (m *MarketDataClient) GetOrderBook(ctx context.Context, symbol string, depth int) (roottypes.OrderBookSnapshot, error) {
 	var out roottypes.OrderBookSnapshot
 	if symbol == "" {
@@ -298,11 +315,11 @@ func (m *MarketDataClient) GetOrderBook(ctx context.Context, symbol string, dept
 	}
 
 	out.Symbol = symbol
-	out.Asks, err = bgcommon.ParseLevels(payload.Asks)
+	out.Asks, err = bgcommon.ParseFlexLevels(payload.Asks)
 	if err != nil {
 		return roottypes.OrderBookSnapshot{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetOrderBook: parse asks", err)
 	}
-	out.Bids, err = bgcommon.ParseLevels(payload.Bids)
+	out.Bids, err = bgcommon.ParseFlexLevels(payload.Bids)
 	if err != nil {
 		return roottypes.OrderBookSnapshot{}, bitget.NewError(bitget.ErrorKindUnknown, "", "mix.MarketData.GetOrderBook: parse bids", err)
 	}

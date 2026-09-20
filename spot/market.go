@@ -17,8 +17,8 @@ IMPLEMENTS:
 BITGET SPOT SPECIFICS:
 
   - /orderbook takes a numeric `limit` (1..150) — unlike mix
-    /merge-depth which uses the named "max15"/"max50"/"max100"/
-    "max200" presets. The SDK clamps the requested depth to [1, 150]
+    /merge-depth which accepts only 1 / 5 / 15 / 50 / max. The SDK
+    clamps the requested depth to [1, 150]
     with depth ≤ 0 → 50 (the venue default plus a sensible market-
     making default).
 

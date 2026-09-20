@@ -4,6 +4,29 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.6.0 — Unreleased (V3 / UTA WebSocket + desk-connector gaps)
+
+Work-in-progress line on branch `uta-account`. Goal: make the V3 UTA profile
+usable by a trading connector end to end — public and private WebSocket on top
+of the existing REST core — plus V2 fixes surfaced by desk sessions.
+
+### Fixed
+
+- **mix `GetOrderBook`: levels decode on the live wire.** `/api/v2/mix/market/merge-depth`
+  ships `asks` / `bids` as bare JSON numbers (`[[81241.3,6.4858],…]`), not the
+  quoted strings the docs show. The payload was typed `[][]string`, so EVERY call
+  failed (`mix.orderbookPayload.Asks: … ReadString: expects " or n, but found 8`)
+  while the string-typed contract fixture stayed green; a desk session
+  (2026-09-19/20) ran with an empty REST order book for hours. Levels are now
+  `[][]bgcommon.FlexString` parsed by the new `bgcommon.ParseFlexLevels`; pinned
+  by `TestContract_GetOrderBook_NumericLevels` and the live, unsigned
+  `TestLive_Mix_OrderBook` (`-tags integration`).
+- **mix `GetOrderBook`: `limit` is honoured.** The venue accepts exactly
+  `1 / 5 / 15 / 50 / max`; the SDK sent `max15 / max50 / max100 / max200`, which
+  the venue silently ignores and answers with the default 100 rows (verified
+  live 2026-09-21). `resolveDepth` now maps the requested depth to the smallest
+  accepted value that covers it (`max` above 50; depth ≤ 0 → `50`).
+
 ## v2.5.1 — 2026-09-12
 
 ### Fixed

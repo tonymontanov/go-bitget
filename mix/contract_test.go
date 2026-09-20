@@ -270,8 +270,8 @@ func TestContract_GetOrderBook_Happy(t *testing.T) {
 		"/api/v2/mix/market/merge-depth": fixture,
 	}, func(t *testing.T, r *http.Request) {
 		var q url.Values = r.URL.Query()
-		if got := q.Get("limit"); got != "max50" {
-			t.Errorf("limit: want max50 (default for depth=0), got %q", got)
+		if got := q.Get("limit"); got != "50" {
+			t.Errorf("limit: want 50 (default for depth=0), got %q", got)
 		}
 		if got := q.Get("precision"); got != "scale0" {
 			t.Errorf("precision: want scale0, got %q", got)
@@ -311,6 +311,55 @@ func TestContract_GetOrderBook_Happy(t *testing.T) {
 	}
 }
 
+// TestContract_GetOrderBook_NumericLevels pins the LIVE wire shape of
+// /merge-depth: levels arrive as bare JSON numbers, not quoted strings
+// (captured on BTCUSDT 20.09.2026). The string-typed payload made every
+// call fail with "ReadString: expects \" or n, but found 8" — the desk's
+// order-book manager ran with an empty book for the whole session.
+func TestContract_GetOrderBook_NumericLevels(t *testing.T) {
+	t.Parallel()
+	const fixture = `{
+		"code":"00000","msg":"success","requestTime":1789925755568,
+		"data":{
+			"asks":[[81255.2,2.1823],[81255.7,0.0013]],
+			"bids":[[81255.1,0.9511],[81254.0,0.0002]],
+			"ts":"1789925755570",
+			"scale":"0.1",
+			"precision":"scale0",
+			"isMaxPrecision":"NO"
+		}
+	}`
+
+	var client *bitget.Client
+	_, client = mockBitget(t, map[string]string{
+		"/api/v2/mix/market/merge-depth": fixture,
+	}, nil)
+
+	var snap roottypes.OrderBookSnapshot
+	var err error
+	snap, err = mixOf(client).MarketData().GetOrderBook(context.Background(), "BTCUSDT", 15)
+	if err != nil {
+		t.Fatalf("GetOrderBook: %v", err)
+	}
+	if len(snap.Asks) != 2 || len(snap.Bids) != 2 {
+		t.Fatalf("levels: want 2/2, got %d/%d", len(snap.Asks), len(snap.Bids))
+	}
+	if !snap.Asks[0].Price.Equal(decimal.RequireFromString("81255.2")) {
+		t.Errorf("Asks[0].Price: want 81255.2, got %s", snap.Asks[0].Price)
+	}
+	if !snap.Asks[0].Size.Equal(decimal.RequireFromString("2.1823")) {
+		t.Errorf("Asks[0].Size: want 2.1823, got %s", snap.Asks[0].Size)
+	}
+	// "81254.0" must survive as the same decimal value (trailing zero on
+	// the wire is not a different price).
+	if !snap.Bids[1].Price.Equal(decimal.RequireFromString("81254")) {
+		t.Errorf("Bids[1].Price: want 81254, got %s", snap.Bids[1].Price)
+	}
+	if snap.TsMs != 1789925755570 {
+		t.Errorf("TsMs: want 1789925755570, got %d", snap.TsMs)
+	}
+}
+
 func TestContract_GetOrderBook_DepthClamp(t *testing.T) {
 	t.Parallel()
 	const fixture = `{"code":"00000","msg":"success","requestTime":0,"data":{"asks":[],"bids":[],"ts":"0","precision":"scale0","scale":"0.5"}}`
@@ -320,15 +369,17 @@ func TestContract_GetOrderBook_DepthClamp(t *testing.T) {
 		in   int
 		want string
 	}{
-		{"negative", -10, "max50"},
-		{"zero", 0, "max50"},
-		{"one", 1, "max15"},
-		{"fifteen", 15, "max15"},
-		{"sixteen", 16, "max50"},
-		{"fifty", 50, "max50"},
-		{"hundred", 100, "max100"},
-		{"twohundred", 200, "max200"},
-		{"oversized", 1000, "max200"},
+		{"negative", -10, "50"},
+		{"zero", 0, "50"},
+		{"one", 1, "1"},
+		{"two", 2, "5"},
+		{"five", 5, "5"},
+		{"fifteen", 15, "15"},
+		{"sixteen", 16, "50"},
+		{"fifty", 50, "50"},
+		{"fiftyone", 51, "max"},
+		{"hundred", 100, "max"},
+		{"oversized", 1000, "max"},
 	}
 
 	for _, tc := range cases {
