@@ -11,15 +11,18 @@ ENDPOINTS (defaults, v1.0):
 	REST:           https://api.bitget.com
 	WS public:      wss://ws.bitget.com/v2/ws/public
 	WS private:     wss://ws.bitget.com/v2/ws/private
+	WS UTA public:  wss://ws.bitget.com/v3/ws/public    (demo: wss://wspap.bitget.com/v3/ws/public)
+	WS UTA private: wss://ws.bitget.com/v3/ws/private   (demo: wss://wspap.bitget.com/v3/ws/private)
 
 A SINGLE WS PRIVATE ENDPOINT serves every contract type (USDT-FUTURES,
 USDC-FUTURES, COIN-FUTURES) — auth is per-UID, not per-product, so the
 SDK does not split it by profile. Spot and UTA introduce additional
 endpoints in v2.0 / v2.5.
 
-TESTNET / DEMO are out of v1.0 scope (see project plan); the URL
-constants are NOT shipped. They will be added together with the
-demo/testnet support in v2.5.
+The V3 (UTA) WebSocket lives on its own pair of endpoints (WS.UTAPublicURL
+/ WS.UTAPrivateURL) and is the only WS surface with a DEMO host: when
+Config.Demo is true and the UTA URLs are left empty they resolve to the
+wspap.bitget.com pair. The V2 endpoints have no demo counterpart.
 */
 
 package bitget
@@ -39,12 +42,22 @@ var (
 	// DefaultWsPrivateURL — production private WS endpoint (login required).
 	DefaultWsPrivateURL string = "wss://ws.bitget.com/v2/ws/private"
 
+	// DefaultWsUTAPublicURL — production V3 (UTA) public WS endpoint. Used
+	// by uta.StreamClient; the V2 profiles keep DefaultWsPublicURL.
+	DefaultWsUTAPublicURL string = "wss://ws.bitget.com/v3/ws/public"
+
+	// DefaultWsUTAPrivateURL — production V3 (UTA) private WS endpoint
+	// (login required).
+	DefaultWsUTAPrivateURL string = "wss://ws.bitget.com/v3/ws/private"
+
 	// DefaultWsPublicURLDemo — DEMO public WS endpoint (UTA paper trading).
-	// Reserved for the future UTA WS sub-phase; not wired by any client yet.
+	// Picked for WS.UTAPublicURL when Config.Demo is true and the field is
+	// empty.
 	DefaultWsPublicURLDemo string = "wss://wspap.bitget.com/v3/ws/public"
 
 	// DefaultWsPrivateURLDemo — DEMO private WS endpoint (UTA paper trading).
-	// Reserved for the future UTA WS sub-phase; not wired by any client yet.
+	// Picked for WS.UTAPrivateURL when Config.Demo is true and the field is
+	// empty. Requires a Demo API Key.
 	DefaultWsPrivateURLDemo string = "wss://wspap.bitget.com/v3/ws/private"
 )
 
@@ -83,8 +96,10 @@ type Config struct {
 	// v2.5; it is a UTA(V3), account-scoped concept, so the header is sent
 	// ONLY on signed /api/v3/* calls — public market data is environment-
 	// agnostic and several public/common endpoints (server time,
-	// announcements) actually 40404 when the header is present. WS demo
-	// (wss://wspap.bitget.com/...) is a separate, later concern.
+	// announcements) actually 40404 when the header is present. The UTA WS
+	// follows the same switch: with Demo set and WS.UTAPublicURL /
+	// WS.UTAPrivateURL left empty, the UTA stream client connects to
+	// wss://wspap.bitget.com/v3/ws/... instead of the production host.
 	Demo bool
 
 	// RateLimitObserver — legacy observer (endpoint, headers). Kept for
@@ -129,6 +144,18 @@ type WsConfig struct {
 	// PrivateURL — private WS endpoint URL. Empty value picks the production
 	// default (DefaultWsPrivateURL).
 	PrivateURL string
+
+	// UTAPublicURL — V3 (UTA) public WS endpoint URL, used by
+	// uta.StreamClient. Empty value picks DefaultWsUTAPublicURL, or
+	// DefaultWsPublicURLDemo when Config.Demo is true. DefaultConfig leaves
+	// it EMPTY on purpose so that flipping Demo after DefaultConfig() still
+	// selects the demo host.
+	UTAPublicURL string
+	// UTAPrivateURL — V3 (UTA) private WS endpoint URL (login required).
+	// Empty value picks DefaultWsUTAPrivateURL, or DefaultWsPrivateURLDemo
+	// when Config.Demo is true. Left empty by DefaultConfig (see
+	// UTAPublicURL).
+	UTAPrivateURL string
 
 	// HandshakeTimeout — TLS+HTTP upgrade timeout. Default 10s.
 	HandshakeTimeout time.Duration
@@ -179,6 +206,10 @@ type OrderbookConfig struct {
 // and HFT-friendly timeouts. Callers can override individual fields and
 // pass the result to NewClient — empty sub-fields fall back to these
 // defaults.
+//
+// WS.UTAPublicURL / WS.UTAPrivateURL are deliberately NOT pre-populated:
+// their default depends on Config.Demo, which callers typically set AFTER
+// DefaultConfig(). They are resolved by NewClient (see withDefaults).
 func DefaultConfig() Config {
 	return Config{
 		REST: RestConfig{
@@ -246,6 +277,20 @@ func (c Config) withDefaults() Config {
 	}
 	if c.WS.PrivateURL == "" {
 		c.WS.PrivateURL = def.WS.PrivateURL
+	}
+	// UTA (V3) endpoints: production by default, the wspap demo host when
+	// Demo is set. An explicit URL always wins (tests point it at a mock).
+	if c.WS.UTAPublicURL == "" {
+		c.WS.UTAPublicURL = DefaultWsUTAPublicURL
+		if c.Demo {
+			c.WS.UTAPublicURL = DefaultWsPublicURLDemo
+		}
+	}
+	if c.WS.UTAPrivateURL == "" {
+		c.WS.UTAPrivateURL = DefaultWsUTAPrivateURL
+		if c.Demo {
+			c.WS.UTAPrivateURL = DefaultWsPrivateURLDemo
+		}
 	}
 	if c.WS.HandshakeTimeout == 0 {
 		c.WS.HandshakeTimeout = def.WS.HandshakeTimeout
