@@ -17,7 +17,11 @@ Coverage:
   - public connect → subscribe → receive push → handler invoked;
   - private login round-trip;
   - reconnect: server closes the socket, client reconnects, the same
-    subscription is sent again automatically.
+    subscription is sent again automatically;
+  - V3 (UTA) args: topic / symbol subscribe op on the wire and push
+    dispatch by the V3 registry key;
+  - Config.OnConnect: reconnect=false on the first connection, true after
+    a forced server-side close; on private endpoints it fires after login.
 */
 
 package ws
@@ -35,6 +39,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/tonymontanov/go-bitget/v2/internal/auth"
+	"github.com/tonymontanov/go-bitget/v2/internal/bgerr"
 	"github.com/tonymontanov/go-bitget/v2/internal/codec"
 )
 
@@ -370,5 +375,214 @@ func TestCloseStopsSupervisor(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close hung")
+	}
+}
+
+// TestConnV3SubscribePush covers the V3 (UTA) coordinates end to end:
+// the subscribe op carries topic / symbol (and no channel / instId), and
+// a push keyed by the same V3 arg reaches the handler.
+func TestConnV3SubscribePush(t *testing.T) {
+	var srv *mockServer = newMockServer(t)
+	defer srv.close()
+
+	var c *Conn = NewConn(Config{
+		URL:                     srv.wsURL(),
+		HandshakeTimeout:        2 * time.Second,
+		ReadTimeout:             3 * time.Second,
+		WriteTimeout:            2 * time.Second,
+		PingInterval:            500 * time.Millisecond,
+		ReconnectInitialBackoff: 50 * time.Millisecond,
+		ReconnectMaxBackoff:     200 * time.Millisecond,
+	}, nil, nil, nil)
+	defer c.Close()
+	c.Start(context.Background())
+
+	type pushEvent struct {
+		arg     SubscriptionArg
+		action  string
+		payload string
+		ts      int64
+	}
+	var pushCh chan pushEvent = make(chan pushEvent, 4)
+	var sub *Subscription = &Subscription{
+		Arg: SubscriptionArg{InstType: "usdt-futures", Topic: "books5", Symbol: "BTCUSDT"},
+		Handler: func(arg SubscriptionArg, action string, payload []byte, tsMs int64, _ int64) {
+			pushCh <- pushEvent{arg: arg, action: action, payload: string(payload), ts: tsMs}
+		},
+	}
+	if err := c.Subscribe(sub); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	select {
+	case got := <-srv.subs:
+		if got.InstType != "usdt-futures" || got.Topic != "books5" || got.Symbol != "BTCUSDT" {
+			t.Fatalf("V3 subscribe arg = %+v", got)
+		}
+		if got.Channel != "" || got.InstID != "" || got.Coin != "" {
+			t.Fatalf("V2 coordinates leaked into a V3 subscribe: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive the V3 subscribe op")
+	}
+
+	var conn *websocket.Conn
+	select {
+	case conn = <-srv.conns:
+	case <-time.After(time.Second):
+		t.Fatal("no client conn captured")
+	}
+	// Live frame shape (captured 2026-09-21), trimmed to one level a side.
+	var push []byte = []byte(`{"action":"snapshot","arg":{"instType":"usdt-futures","topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[["80810.4","0.8523"]],"b":[["80810.3","1.0943"]],"seq":993094633676,"pseq":0,"ts":"1789940582101"}],"ts":1789940582102}`)
+	srv.writeMu.Lock()
+	_ = conn.WriteMessage(websocket.TextMessage, push)
+	srv.writeMu.Unlock()
+
+	select {
+	case ev := <-pushCh:
+		if ev.action != "snapshot" || ev.arg.Topic != "books5" || ev.arg.Symbol != "BTCUSDT" || ev.ts != 1789940582102 {
+			t.Fatalf("unexpected V3 push event: %+v", ev)
+		}
+		if !strings.Contains(ev.payload, `"seq":993094633676`) {
+			t.Fatalf("payload not forwarded verbatim: %s", ev.payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("V3 handler not invoked")
+	}
+}
+
+// TestSubscribeValidation: an arg needs a V2 channel OR a V3 topic.
+func TestSubscribeValidation(t *testing.T) {
+	var c *Conn = NewConn(Config{URL: "ws://127.0.0.1:1"}, nil, nil, nil)
+	defer c.Close()
+	var noop = func(SubscriptionArg, string, []byte, int64, int64) {}
+
+	var err error = c.Subscribe(&Subscription{Arg: SubscriptionArg{InstType: "usdt-futures", Symbol: "BTCUSDT"}, Handler: noop})
+	if !bgerr.IsInvalidRequest(err) {
+		t.Fatalf("arg without channel/topic: want InvalidRequest, got %v", err)
+	}
+	err = c.Subscribe(&Subscription{Arg: SubscriptionArg{InstType: "UTA", Topic: "order"}})
+	if !bgerr.IsInvalidRequest(err) {
+		t.Fatalf("nil handler: want InvalidRequest, got %v", err)
+	}
+	// Queued (never started) — both generations are accepted.
+	if err = c.Subscribe(&Subscription{Arg: SubscriptionArg{InstType: "UTA", Topic: "order"}, Handler: noop}); err != nil {
+		t.Fatalf("V3 arg rejected: %v", err)
+	}
+	if err = c.Subscribe(&Subscription{Arg: SubscriptionArg{InstType: "USDT-FUTURES", Channel: "ticker", InstID: "BTCUSDT"}, Handler: noop}); err != nil {
+		t.Fatalf("V2 arg rejected: %v", err)
+	}
+}
+
+// TestConnOnConnectHook: reconnect=false for the first successful
+// connection, reconnect=true after the server force-closes the socket.
+func TestConnOnConnectHook(t *testing.T) {
+	var srv *mockServer = newMockServer(t)
+	defer srv.close()
+
+	var events chan bool = make(chan bool, 8)
+	var c *Conn = NewConn(Config{
+		URL:                     srv.wsURL(),
+		HandshakeTimeout:        2 * time.Second,
+		ReadTimeout:             2 * time.Second,
+		WriteTimeout:            2 * time.Second,
+		PingInterval:            300 * time.Millisecond,
+		ReconnectInitialBackoff: 30 * time.Millisecond,
+		ReconnectMaxBackoff:     200 * time.Millisecond,
+		OnConnect:               func(reconnect bool) { events <- reconnect },
+	}, nil, nil, nil)
+	defer c.Close()
+
+	var sub *Subscription = &Subscription{
+		Arg:     SubscriptionArg{InstType: "usdt-futures", Topic: "ticker", Symbol: "BTCUSDT"},
+		Handler: func(SubscriptionArg, string, []byte, int64, int64) {},
+	}
+	if err := c.Subscribe(sub); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	c.Start(context.Background())
+
+	select {
+	case reconnect := <-events:
+		if reconnect {
+			t.Fatal("first connection reported reconnect=true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnConnect not invoked for the first connection")
+	}
+	select {
+	case <-srv.subs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial subscribe missing")
+	}
+
+	var oldConn *websocket.Conn
+	select {
+	case oldConn = <-srv.conns:
+	case <-time.After(time.Second):
+		t.Fatal("no captured conn")
+	}
+	_ = oldConn.Close()
+
+	select {
+	case reconnect := <-events:
+		if !reconnect {
+			t.Fatal("second connection reported reconnect=false")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnConnect not invoked after the forced close")
+	}
+	// The hook fires after the resubscribe op was written — the server
+	// must see it.
+	select {
+	case got := <-srv.subs:
+		if got.Topic != "ticker" {
+			t.Fatalf("re-subscribe arg = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not resubscribe after reconnect")
+	}
+	select {
+	case extra := <-events:
+		t.Fatalf("unexpected extra OnConnect(%v)", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestConnOnConnectPrivateAfterLogin: on a private endpoint the hook runs
+// only after the login round-trip completed.
+func TestConnOnConnectPrivateAfterLogin(t *testing.T) {
+	var srv *mockServer = newMockServer(t)
+	defer srv.close()
+
+	var loginsSeenAtHook chan int = make(chan int, 2)
+	var signer *auth.Signer = auth.NewSigner("k", "s", "p")
+	var c *Conn = NewConn(Config{
+		URL:                     srv.wsURL(),
+		IsPrivate:               true,
+		HandshakeTimeout:        2 * time.Second,
+		ReadTimeout:             3 * time.Second,
+		WriteTimeout:            2 * time.Second,
+		LoginTimeout:            2 * time.Second,
+		PingInterval:            500 * time.Millisecond,
+		ReconnectInitialBackoff: 50 * time.Millisecond,
+		ReconnectMaxBackoff:     200 * time.Millisecond,
+		OnConnect: func(reconnect bool) {
+			if reconnect {
+				return
+			}
+			loginsSeenAtHook <- len(srv.logins)
+		},
+	}, signer, nil, nil)
+	defer c.Close()
+	c.Start(context.Background())
+
+	select {
+	case n := <-loginsSeenAtHook:
+		if n != 1 {
+			t.Fatalf("OnConnect fired with %d login ops processed by the server, want 1", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnConnect not invoked on the private endpoint")
 	}
 }

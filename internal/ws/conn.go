@@ -12,9 +12,13 @@ RESPONSIBILITIES:
   - private-only login (op=login, see internal/auth.SignWS);
   - heartbeat (plain-text "ping" frame every PingInterval);
   - subscribe / unsubscribe with a registry keyed by (instType, channel,
-    instId, coin) that survives reconnects;
+    instId, coin) — or (instType, topic, symbol) for V3 / UTA args — that
+    survives reconnects;
   - resubscribe after every successful (re)connect, transparently to caller;
   - dispatch incoming push frames to the per-arg handler;
+  - optional Config.OnConnect hook after every successful (re)connect so
+    a stream client can tell its consumers "the transport was reset,
+    re-seed your state";
   - graceful shutdown via Close() or ctx cancellation.
 
 DESIGN NOTES (DIFFERENCES VS. BYBIT WS):
@@ -75,8 +79,9 @@ var ErrConnClosed = errors.New("ws: connection closed")
 // (domain stream package) constructs it once and passes it to Subscribe;
 // the same Subscription is reused on every reconnect via its Reset hook.
 type Subscription struct {
-	// Arg — instType / channel / instId / coin tuple. Required;
-	// Channel must be non-empty.
+	// Arg — instType / channel / instId / coin tuple (V2) or instType /
+	// topic / symbol tuple (V3). Required; Channel or Topic must be
+	// non-empty.
 	Arg SubscriptionArg
 	// Handler is invoked for every push frame whose arg matches. Args:
 	//
@@ -130,6 +135,19 @@ type Config struct {
 	// ReadBufferSize / WriteBufferSize — gorilla/websocket buffer sizes.
 	ReadBufferSize  int
 	WriteBufferSize int
+	// OnConnect — optional hook invoked after every successful connection
+	// cycle: dial ok, login ok (private endpoints) and the resubscribe op
+	// for the surviving registry written to the socket. `reconnect` is
+	// false for the first successful connection of this Conn and true for
+	// every later one.
+	//
+	// The hook runs SYNCHRONOUSLY on the supervisor goroutine, before the
+	// read / ping loops of the new socket start: nothing is read from the
+	// socket while it runs. Implementations must be fast and must not
+	// block (hand long work — a REST re-seed — off to another goroutine).
+	// It is NOT invoked when the dial, the login or the resubscribe write
+	// failed. nil → no-op.
+	OnConnect func(reconnect bool)
 }
 
 // Conn — managing wrapper over a single Bitget WS connection.
@@ -148,6 +166,11 @@ type Conn struct {
 	writeMu sync.Mutex
 
 	startOnce sync.Once
+
+	// everConnected — true once one connection cycle reached the
+	// OnConnect point. Touched only by the supervisor goroutine
+	// (connectAndRun), hence no lock.
+	everConnected bool
 
 	cReceived bgmet.Counter
 	cDropped  bgmet.Counter
@@ -207,7 +230,7 @@ func (c *Conn) Start(ctx context.Context) {
 // subscribe op immediately. Otherwise the subscription waits in the
 // registry and is sent automatically on the next successful (re)connect.
 func (c *Conn) Subscribe(sub *Subscription) error {
-	if sub == nil || sub.Arg.Channel == "" || sub.Handler == nil {
+	if sub == nil || sub.Arg.Name() == "" || sub.Handler == nil {
 		return bgerr.New(bgerr.ErrorKindInvalidRequest, "", "ws: invalid subscription", nil)
 	}
 	var key string = sub.Arg.Key()
@@ -344,6 +367,7 @@ func (c *Conn) connectAndRun(ctx context.Context) error {
 	}
 
 	// Resubscribe everything that survived the previous disconnect.
+	var resubscribeOK bool = true
 	if len(subsCopy) > 0 {
 		var argsBatch []SubscriptionArg = make([]SubscriptionArg, len(subsCopy))
 		var i int
@@ -351,7 +375,21 @@ func (c *Conn) connectAndRun(ctx context.Context) error {
 			argsBatch[i] = subsCopy[i].Arg
 		}
 		if err = c.sendOp(socket, "subscribe", argsBatch); err != nil {
+			resubscribeOK = false
 			c.logger.Warn("ws: resubscribe failed", bglog.Err(err))
+		}
+	}
+
+	// Connection cycle is complete (dial + login + resubscribe): tell the
+	// owner. Synchronous by contract — the loops below have not started
+	// yet, so the hook observes a quiescent socket. A failed resubscribe
+	// write means the socket is already broken; the read loop will fail
+	// and the NEXT cycle reports the (re)connect instead.
+	if resubscribeOK {
+		var reconnect bool = c.everConnected
+		c.everConnected = true
+		if c.cfg.OnConnect != nil {
+			c.cfg.OnConnect(reconnect)
 		}
 	}
 
@@ -393,6 +431,15 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 	// uses ms, WS doesn't). Sending ms made the server silently drop the
 	// login frame and the client timed out on its login deadline. See
 	// internal/auth/sign.go for the docs trail.
+	//
+	// V3 (UTA, /v3/ws/private) reuses this exact login: same op, same
+	// args, same prehash (timestamp + "GET" + "/user/verify") and the
+	// timestamp is in SECONDS as well. The V3 quick-start TEXT says
+	// "Unix timestamp in milliseconds", but (a) its own Java sample
+	// computes `System.currentTimeMillis() / 1000`, (b) its JSON request
+	// sample carries a 10-digit value ("1538054050") and (c) the
+	// reference client tiagosiebler/bitget-api signs V3 with seconds. V2
+	// shipped the same doc bug. Do not "fix" this to milliseconds.
 	var ts string = c.signer.SecondsTimestamp(time.Time{})
 	var signature string
 	var err error
@@ -570,11 +617,27 @@ func (c *Conn) readLoop(ctx context.Context, socket *websocket.Conn) error {
 func (c *Conn) handleControl(env *Envelope) {
 	switch env.Event {
 	case "subscribe":
+		if env.Arg.IsV3() {
+			c.logger.Debug("ws: subscribed",
+				bglog.Str("instType", env.Arg.InstType),
+				bglog.Str("topic", env.Arg.Topic),
+				bglog.Str("symbol", env.Arg.Symbol),
+			)
+			return
+		}
 		c.logger.Debug("ws: subscribed",
 			bglog.Str("channel", env.Arg.Channel),
 			bglog.Str("instId", env.Arg.InstID),
 		)
 	case "unsubscribe":
+		if env.Arg.IsV3() {
+			c.logger.Debug("ws: unsubscribed",
+				bglog.Str("instType", env.Arg.InstType),
+				bglog.Str("topic", env.Arg.Topic),
+				bglog.Str("symbol", env.Arg.Symbol),
+			)
+			return
+		}
 		c.logger.Debug("ws: unsubscribed",
 			bglog.Str("channel", env.Arg.Channel),
 			bglog.Str("instId", env.Arg.InstID),
