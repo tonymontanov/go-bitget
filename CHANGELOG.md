@@ -4,11 +4,14 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v2.6.0 — Unreleased (V3 / UTA WebSocket + desk-connector gaps)
+## v2.6.0 — 2026-09-24 (V3 / UTA WebSocket + desk-connector gaps)
 
-Work-in-progress line on branch `uta-account`. Goal: make the V3 UTA profile
-usable by a trading connector end to end — public and private WebSocket on top
-of the existing REST core — plus V2 fixes surfaced by desk sessions.
+The V3 UTA profile is usable by a trading connector end to end — public and
+private WebSocket on top of the existing REST core — plus V2 fixes surfaced by
+desk sessions. Developed on branch `uta-account` (2026-09-18…23), merged to
+`main` for this release. Private V3 channels were verified against the live
+venue on 2026-09-23 (order / fill / position / account, USDT-FUTURES + SPOT,
+one-way + hedge) by the Sleipnir core harness and the trading-backend adapter.
 
 ### Added
 
