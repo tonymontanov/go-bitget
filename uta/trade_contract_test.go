@@ -68,6 +68,27 @@ func TestContract_Trade_PlaceModifyCancel(t *testing.T) {
 	if _, err = uc.Trade().ModifyOrder(ctx, ModifyOrderRequest{}); err == nil {
 		t.Error("ModifyOrder(no id): want guard")
 	}
+	// Vocabulary guards: a typo must be caught before the wire.
+	var base = PlaceOrderRequest{Category: utatypes.CategoryUSDTFutures, Symbol: "BTCUSDT", Qty: "0.01",
+		Side: utatypes.SideBuy, OrderType: utatypes.OrderTypeLimit, Price: "60000"}
+	var bad []PlaceOrderRequest = []PlaceOrderRequest{base, base, base, base, base, base}
+	bad[0].Side = "BUY"
+	bad[1].OrderType = "Limit"
+	bad[2].TimeInForce = "gtx"
+	bad[3].PosSide = "both"
+	bad[4].ReduceOnly = "true"
+	bad[5].OrderType, bad[5].TimeInForce = utatypes.OrderTypeMarket, utatypes.TimeInForcePostOnly
+	var i int
+	for i = 0; i < len(bad); i++ {
+		if _, err = uc.Trade().PlaceOrder(ctx, bad[i]); err == nil {
+			t.Errorf("PlaceOrder(bad vocabulary #%d): want guard error", i)
+		}
+	}
+	var ok = base
+	ok.TimeInForce, ok.PosSide, ok.ReduceOnly = utatypes.TimeInForcePostOnly, utatypes.PosSideShort, utatypes.ReduceOnlyNo
+	if _, err = uc.Trade().PlaceOrder(ctx, ok); err != nil {
+		t.Errorf("PlaceOrder(full vocabulary): %v", err)
+	}
 	if _, err = uc.Trade().CancelOrder(ctx, CancelOrderRequest{}); err == nil {
 		t.Error("CancelOrder(no id): want guard")
 	}
