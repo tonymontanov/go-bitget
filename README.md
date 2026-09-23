@@ -14,7 +14,8 @@ Pending GA: **v2.0.0** — SPOT GA roll-up of `m1`–`m6` (spot examples + `exam
 `v1.0` covers the **MIX (USDT-margined perpetuals)** category end-to-end.
 **SPOT** is feature-complete under **v2.0** (`m1`–`m6`) and at the GA
 roll-up stage (runnable spot examples + live smoke harness shipped).
-The new **UTA (V3)** family is deferred to v2.5.
+The **UTA (V3)** family ships its REST core under v2.5 and its WebSocket
+(`uta.StreamClient`) under v2.6.
 
 | Module | Status | Notes |
 | --- | --- | --- |
@@ -35,7 +36,8 @@ The new **UTA (V3)** family is deferred to v2.5.
 | **v2.0-m4** `spot/` public WebSocket | done | `StreamClient`: `WatchOrderbook` (full-depth + CRC32 resync via shared `bgcommon/orderbook.Engine`) / `WatchTicker` (24h roll-ups: `open24h` / `high24h` / `low24h` / `change24h` / ...; no mark/index/funding) / `WatchTrades` (fan-out + buy/sell normalisation) / `WatchKline` (7-element row decoder via `bgcommon.ParseCandleRow`). Lazy `*ws.Conn` over `cfg.WS.PublicURL` (multiplexes spot + future uta on the same socket). New `bgcommon.OrderbookFrame` / `TradeFrame` / `ParseTradeFrame` / `ParseCandleRow` lifted from mix; ticker shape stays profile-local. Subscribe args pin `instType="SPOT"` (regression guard tested on every `Watch*`). |
 | **v2.0-m5** `spot/` private WebSocket | done | `StreamClient.WatchOrders` over lazy signed `*ws.Conn` (`cfg.WS.PrivateURL`); subscribe arg pins `instType=SPOT, channel=orders, instId=default` (Bitget V2 rejects per-symbol with `code=30001`); per-symbol semantics preserved client-side via the `instId` filter inside the dispatcher. Wire row reuses `bgcommon.FlexString` + `ParseDecimalOrZero` / `ParseInt64OrZero`; spot row omits mix-only fields (`tradeSide` / `posSide` / `marginCoin` / `marginMode` / `leverage` / `reduceOnly`). Auth pre-flight returns `ErrorKindAuth`; client-side validation returns `ErrorKindInvalidRequest`. `WatchPositions` intentionally omitted (cash-only spot has no positions); `WatchAccount` / `WatchFills` deferred to M6. |
 | **v2.0-m6** mix↔spot private-WS symmetry | done | `spot.StreamClient.WatchAccount` over `coin="default"` + client-side per-coin filter; profile-local `spottypes.AccountUpdate` (per-asset, distinct from mix's per-margin-coin `roottypes.Balance`). `spot.StreamClient.WatchFills` + `mix.StreamClient.WatchFills` over `instId="default"` + client-side symbol filter; profile-local `spottypes.FillUpdate` / `mixtypes.FillUpdate` (mix carries `clientOid` / `posMode` / `tradeSide` / `profit` that spot does not). New `bgcommon.WSFeeDetail` + `ParseFeeDetailList` consumed by both profiles — the one piece of the fill push that has byte-identical wire across mix and spot. Audit pass on `mix/stream-private.go` extended contract-test coverage to M5 parity (orders filter / default-symbol / numeric-fields regression guards added; mix already implemented the M5 discipline since v1.2.x PARTIUSDT fixes). After M6 the mix and spot private surfaces are fully symmetric except `WatchPositions`, which is mix-only by venue contract. |
-| **v2.5** `uta/` profile + demo / testnet support | pending | V3 endpoints, hedge mode, simulated trading hosts |
+| **v2.5** `uta/` profile (REST core) + demo | done | V3 Public / Account / Trade / Position / Strategy, hedge mode, `Config.Demo` (`paptrading`) |
+| **v2.6** `uta/` V3 WebSocket | done (private topics verified live 2026-09-23: order / fill / position / account on USDT-FUTURES + SPOT) | `uta.StreamClient`: `WatchTicker` / `WatchPublicTrades` / `WatchOrderBook` (books1/5/50 stateless; `books` local incremental book on the seq/pseq chain, resync on gap) + private account-wide `WatchOrders` / `WatchFills` / `WatchPositions` / `WatchAccount`; multi-handler fan-out over one wire subscription; `OnPublicReconnect` / `OnPrivateReconnect`; `Config.WS.UTAPublicURL` / `UTAPrivateURL` (demo host via `Config.Demo`). |
 
 ## Quick start
 
@@ -228,6 +230,73 @@ _ = sc.Stream().WatchFills(streamCtx, "BTCUSDT",
 )
 ```
 
+### UTA profile — V3 streaming (v2.6.0)
+
+The V3 Unified Trading Account keys everything on a per-call `category`;
+its WebSocket lives on its own endpoints (`/v3/ws/...`, demo:
+`wspap.bitget.com`, selected by `cfg.Demo`). Public topics are verified
+against the live venue; the private ones are implemented from the docs and
+still need a run with a UTA / Demo key.
+
+```go
+import (
+    "errors"
+
+    bitget "github.com/tonymontanov/go-bitget/v2"
+    "github.com/tonymontanov/go-bitget/v2/uta"
+    utatypes "github.com/tonymontanov/go-bitget/v2/uta/types"
+)
+
+cfg := bitget.DefaultConfig()
+cfg.APIKey, cfg.SecretKey, cfg.Passphrase = "...", "...", "..." // private topics only
+// cfg.Demo = true // → wss://wspap.bitget.com/v3/ws/... + a Demo API Key
+
+client, _ := bitget.NewClient(cfg)
+defer client.Close()
+
+stream := client.UTA().(*uta.Client).Stream()
+defer stream.Close()
+
+// Public: (category, symbol). instType on the wire is the lower-case category.
+_ = stream.WatchTicker(ctx, utatypes.CategoryUSDTFutures, "BTCUSDT",
+    func(t utatypes.TickerUpdate) { /* last / BBO / mark / index / funding */ }, nil)
+_ = stream.WatchPublicTrades(ctx, utatypes.CategoryUSDTFutures, "BTCUSDT",
+    func(t utatypes.PublicTradeUpdate) { /* one call per trade, oldest first */ }, nil)
+
+// depth ≤1 / ≤5 / ≤50 → books1 / books5 / books50 (stateless snapshots);
+// depth > 50 → `books`: a local incremental book validated by seq / pseq.
+_ = stream.WatchOrderBook(ctx, utatypes.CategoryUSDTFutures, "BTCUSDT", 200,
+    func(ob utatypes.OrderBookUpdate) { /* full top-200 view after every push */ },
+    func(err error) {
+        if errors.Is(err, uta.ErrOrderBookResync) { /* gap → the SDK is resubscribing */ }
+    })
+
+// Private: ACCOUNT-WIDE topics ({"instType":"UTA","topic":"order"}) — every
+// category / symbol arrives, filter by o.Category / o.Symbol.
+_ = stream.WatchOrders(ctx, func(o utatypes.Order) { /* new | partially_filled | filled | cancelled */ }, nil)
+_ = stream.WatchFills(ctx, func(f utatypes.Fill) {}, nil)
+_ = stream.WatchPositions(ctx, func(p utatypes.CurrentPosition) {}, nil)
+_ = stream.WatchAccount(ctx, func(a utatypes.AccountAssets) {}, nil)
+
+// The venue does not replay order / fill events missed while the socket was
+// down: re-seed over REST after every private RE-connect.
+removeHook := stream.OnPrivateReconnect(func() { /* signal a REST re-seed; do not block */ })
+defer removeHook()
+
+// A watchdog that sees own fills over REST but no private pushes can force
+// a fresh socket (relogin + resubscribe; the hook above fires afterwards).
+_ = stream.ReconnectPrivate("private channel silent")
+```
+
+Outbound messages are gated at the venue's 10 per second per connection
+(`Config.WS.WriteRateLimit`): a burst of `Watch*` calls is spread out
+instead of getting the socket dropped without a close frame.
+
+Unlike the V2 profiles, several `Watch*` calls for the same wire arg
+**share one wire subscription**: each handler detaches with its own `ctx`
+and the wire unsubscribe goes out with the last one — no consumer-side
+fan-out needed.
+
 End-to-end runnable demos live under [`examples/`](./examples):
 
 MIX (v1.0):
@@ -326,6 +395,10 @@ hits the real Bitget host and is excluded from normal builds:
 # Unsigned public checks only — no credentials needed:
 go test -tags integration ./integration/ -run 'TestLive_(UTA_Server|UTA_Instr|UTA_Ticker|UTA_Funding|Common_)' -v
 
+# Unsigned V3 public WebSocket (production + demo host): ticker, books5 and
+# the seq-validated local `books` book must stream without a single resync:
+go test -tags integration ./integration/ -run TestLive_UTA_Stream -v
+
 # Full signed read-only suite against DEMO (paper) trading:
 export BITGET_API_KEY=...        # a DEMO API Key (create one in Demo mode)
 export BITGET_SECRET_KEY=...
@@ -364,7 +437,9 @@ go-bitget/
     bgerr/     — Error type, ErrorKind, MapBitgetCode / MapHTTPStatus
     bglog/     — Logger interface + Field / NoopLogger
     bgmet/     — Counter / CounterFactory + NoopMetrics
-    codec/     — jsoniter wrappers + ParseDecimal / ParseInt64 / RawJSON
+    codec/     — jsoniter wrappers + ParseDecimal / ParseInt64 / RawJSON;
+                 wire.go: allocation-light WS field types (WireDecimal /
+                 WireInt64 / WireLevels / WireToken) + UnmarshalWire
     bgcommon/  — domain-agnostic helpers (level/candle parsing) shared
                  by mix/, spot/, uta/
     rest/      — low-level HTTP client, Bitget envelope { code, msg, data, requestTime }
@@ -394,7 +469,15 @@ go-bitget/
                           #   stream-private.go — private WS: WatchOrders (m5),
                           #                       WatchAccount + WatchFills (m6, done)
                           #   types/            — spot-only domain types
-  uta/                    # v2.5 — Unified Trading Account (planned)
+  uta/                    # v2.5 / v2.6 — V3 Unified Trading Account
+                          #   public.go / account.go / trade.go /
+                          #   position.go / strategy.go — REST core (v2.5)
+                          #   stream.go         — V3 WS: conns, multi-handler
+                          #                       fan-out, ticker, publicTrade
+                          #   stream-book.go    — WatchOrderBook: books1/5/50 +
+                          #                       local `books` book (seq/pseq)
+                          #   stream-private.go — order / fill / position / account
+                          #   types/            — UTA domain types (+ stream.go)
   examples/               # runnable end-to-end demos (v1.0)
                           #   marketdata/      — public REST + WS book
                           #   place-order/     — signed REST trade
@@ -453,12 +536,21 @@ non-blocking send to a buffered channel is the typical shape.
 
 The headers map carries `X-RateLimit-Limit` / `X-RateLimit-Remaining` /
 `X-RateLimit-Used` / `X-RateLimit-Reset` / `Retry-After` when Bitget
-returns them.
+returns them. V3 (UTA) endpoints send none of those; their quota signal
+is `X-Mbx-Used-Remain-Limit` (remaining requests in the window), forwarded
+under that key.
 
 ## WebSocket
 
 - Public stream:  `wss://ws.bitget.com/v2/ws/public`.
 - Private stream: `wss://ws.bitget.com/v2/ws/private`.
+- UTA (V3) streams: `wss://ws.bitget.com/v3/ws/public` / `.../v3/ws/private`
+  (`Config.WS.UTAPublicURL` / `UTAPrivateURL`); with `Config.Demo` and the
+  fields left empty → `wss://wspap.bitget.com/v3/ws/...`. V3 args are
+  `{"instType":"usdt-futures","topic":"books","symbol":"BTCUSDT"}` (public,
+  lower-case instType) and `{"instType":"UTA","topic":"order"}` (private,
+  account-wide); the ping / login protocol is the V2 one, including the
+  SECONDS login timestamp.
 - Application-level keep-alive: plain-text TEXT frame body `ping`,
   echoed back as `pong` (every 20s by default).
 - Login payload (private):

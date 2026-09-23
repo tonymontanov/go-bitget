@@ -89,6 +89,8 @@ type instrumentRow struct {
 	PricePrecision      string `json:"pricePrecision"`
 	QuantityPrecision   string `json:"quantityPrecision"`
 	QuotePrecision      string `json:"quotePrecision"`
+	PriceMultiplier     string `json:"priceMultiplier"`
+	QuantityMultiplier  string `json:"quantityMultiplier"`
 	MinOrderQty         string `json:"minOrderQty"`
 	MaxOrderQty         string `json:"maxOrderQty"`
 	MaxMarketOrderQty   string `json:"maxMarketOrderQty"`
@@ -98,6 +100,7 @@ type instrumentRow struct {
 	MakerFeeRate        string `json:"makerFeeRate"`
 	TakerFeeRate        string `json:"takerFeeRate"`
 	SymbolType          string `json:"symbolType"`
+	Type                string `json:"type"`
 	MinLeverage         string `json:"minLeverage"`
 	MaxLeverage         string `json:"maxLeverage"`
 	FundInterval        string `json:"fundInterval"`
@@ -147,6 +150,7 @@ func (p *PublicClient) GetInstruments(ctx context.Context, category utatypes.Cat
 			QuantityPrecision: i32(r.QuantityPrecision),
 			QuotePrecision:    i32(r.QuotePrecision),
 			SymbolType:        r.SymbolType,
+			Type:              r.Type,
 			FundInterval:      r.FundInterval,
 			LaunchTimeMs:      i64(r.LaunchTime),
 			DeliveryTime:      i64(r.DeliveryTime),
@@ -156,6 +160,8 @@ func (p *PublicClient) GetInstruments(ctx context.Context, category utatypes.Cat
 			dst *decimal.Decimal
 			raw string
 		}{
+			{&inst.PriceMultiplier, r.PriceMultiplier},
+			{&inst.QuantityMultiplier, r.QuantityMultiplier},
 			{&inst.MinOrderQty, r.MinOrderQty},
 			{&inst.MaxOrderQty, r.MaxOrderQty},
 			{&inst.MaxMarketOrderQty, r.MaxMarketOrderQty},

@@ -76,6 +76,35 @@ func ParseLevels(pairs [][]string) ([]types.OrderBookLevel, error) {
 	return out, nil
 }
 
+// ParseFlexLevels is ParseLevels for tuples decoded as FlexString, i.e.
+// for endpoints whose live wire ships levels as bare JSON numbers
+// ([[81241.3,6.4858],...]) while the docs show quoted strings — V2
+// /api/v2/mix/market/merge-depth is the known case (production
+// regression 19.09.2026: every OBM REST refresh failed to decode).
+func ParseFlexLevels(pairs [][]FlexString) ([]types.OrderBookLevel, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	var out []types.OrderBookLevel = make([]types.OrderBookLevel, 0, len(pairs))
+	var pair [2]string
+	var i int
+	for i = 0; i < len(pairs); i++ {
+		if len(pairs[i]) < 2 {
+			return nil, ErrLevelShape
+		}
+		pair[0] = string(pairs[i][0])
+		pair[1] = string(pairs[i][1])
+		var lvl types.OrderBookLevel
+		var err error
+		lvl, err = ParseLevel(pair[:])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, lvl)
+	}
+	return out, nil
+}
+
 // ParseCandle converts a Bitget kline tuple into a typed Candle. The
 // expected arity is 7: [openTimeMs, open, high, low, close, volumeBase,
 // volumeQuote]. Bitget sometimes sends an 8th element (USDT-quote

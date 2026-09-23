@@ -4,6 +4,171 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.6.0 — 2026-09-24 (V3 / UTA WebSocket + desk-connector gaps)
+
+The V3 UTA profile is usable by a trading connector end to end — public and
+private WebSocket on top of the existing REST core — plus V2 fixes surfaced by
+desk sessions. Developed on branch `uta-account` (2026-09-18…23), merged to
+`main` for this release. Private V3 channels were verified against the live
+venue on 2026-09-23 (order / fill / position / account, USDT-FUTURES + SPOT,
+one-way + hedge) by the Sleipnir core harness and the trading-backend adapter.
+
+### Added
+
+- **`uta.StreamClient` — V3 (UTA) WebSocket, public + private.** Reached via
+  `uta.Client.Stream()`; two lazy connections (first public / first private
+  `Watch*`) on the new endpoints, root `Config.WS` timeouts, transparent
+  reconnect / relogin / resubscribe through `internal/ws`.
+  - **Public** (`category` + `symbol`; wire `instType` = lower-case category,
+    `MARGIN` / empty rejected client-side): `WatchTicker` (`ticker` →
+    `utatypes.TickerUpdate`; mark / index / funding zero on spot),
+    `WatchPublicTrades` (`publicTrade` → `utatypes.PublicTradeUpdate`; the
+    history `snapshot` frame sent on subscribe is **skipped**, a multi-trade
+    frame is delivered **oldest first** — the venue lists newest first),
+    `WatchOrderBook` (`utatypes.OrderBookUpdate`, always the full top-of-book
+    view): depth ≤1 / ≤5 / ≤50 → the stateless `books1` / `books5` / `books50`
+    topics, depth > 50 → `books` kept as a **local incremental book**. V3 ships
+    no checksum; integrity is the `seq` / `pseq` chain (`pseq` must equal the
+    last applied `seq`; size `0` deletes). A gap, `pseq = 0` on an update or an
+    update before the snapshot drops the book, surfaces ONE error wrapping the
+    new `uta.ErrOrderBookResync` and resubscribes (unsubscribe → 50 ms →
+    subscribe, de-duplicated). The book keeps every level the venue sent and
+    truncates only the delivered view. Wire shapes verified against live frames
+    (2026-09-21); `books15` / `books200` do not exist on V3.
+  - **Private** (account-wide: `{"instType":"UTA","topic":"order"|"fill"|
+    "position"|"account"}`, no symbol — every category / symbol is delivered):
+    `WatchOrders` / `WatchFills` / `WatchPositions` / `WatchAccount` deliver
+    the REST domain types, one call per row. Missing credentials →
+    `ErrorKindAuth` before dialling. Login is the V2 one (timestamp in
+    **seconds**; the V3 docs text says ms, their samples and the reference
+    client say seconds). **Implemented from the docs only — no UTA key was
+    available**; decoding is deliberately tolerant (any scalar type per field,
+    `feeDetail` as array / object / string / null never drops a row, WS and REST
+    field spellings both read).
+  - **Multi-handler fan-out inside the SDK.** Any number of `Watch*` calls for
+    the same wire arg share ONE wire subscription; each handler detaches with
+    its own `ctx` (nil → until `Close`), the wire unsubscribe goes out with the
+    last one. Handlers run in registration order on the read goroutine; the
+    handler list is copy-on-write behind an atomic pointer (no lock, no
+    allocation per frame). Two `WatchOrderBook` callers on one topic get their
+    own depth each.
+  - **`OnPublicReconnect` / `OnPrivateReconnect`** — callbacks fired after every
+    successful RE-connect (login ok + resubscribe sent), never on the first
+    connect; return a remove func.
+- **Domain types.** New `uta/types/stream.go` (`TickerUpdate`,
+  `PublicTradeUpdate`, `OrderBookUpdate`). REST types extended additively for
+  the WS rows: `Order` (+`TradeSide`, `MarginMode`, `MarginCoin`, `Leverage`,
+  `TotalProfit`; WS `holdSide` → `PosSide`), `Fill` (+`ClientOID`, `ExecTime`,
+  `PosSide`, `IsRPI`, `ExecLinkID`; `CreatedTime` falls back to `ExecTime`),
+  `CurrentPosition` (+`MarginSize`; WS `size` → `Total`, `liqPrice` →
+  `LiquidationPrice`, `totalFundingFee` → `TotalFunding`; the WS row has no
+  category), `AccountAsset` (+`Borrow`, `Bonus`; WS `totalEquity` →
+  `AccountEquity`, `coin[]` → `Assets`). WS `category` is normalised to the
+  canonical upper-case form (`usdt-futures` → `USDT-FUTURES`) so it compares
+  equal to the REST rows and the `Category` constants.
+- **Config: `WS.UTAPublicURL` / `WS.UTAPrivateURL`** with the new constants
+  `DefaultWsUTAPublicURL` / `DefaultWsUTAPrivateURL`
+  (`wss://ws.bitget.com/v3/ws/public|private`). Empty + `Config.Demo` → the
+  `wspap.bitget.com` demo pair (`DefaultWsPublicURLDemo` /
+  `DefaultWsPrivateURLDemo`, now wired). `DefaultConfig()` leaves both empty on
+  purpose so that setting `Demo` after `DefaultConfig()` still selects the demo
+  host; `NewClient` resolves them.
+- **`internal/ws`: V3 coordinates + connect hook (backwards compatible).**
+  `SubscriptionArg` gained `Topic` / `Symbol` (`omitempty` — V2 frames marshal
+  byte-identically, pinned by `TestSubscriptionArgV2MarshalUnchanged`);
+  `Key()` returns `v3:instType:topic:symbol` when `Topic` is set, the V2 key is
+  unchanged; `Envelope.IsPush` / `Conn.Subscribe` accept channel OR topic;
+  control-frame debug logs print topic / symbol. New `Config.OnConnect
+  func(reconnect bool)`, invoked synchronously after dial (+login) and the
+  resubscribe write, before the read loop starts.
+- **`internal/codec/wire.go` — allocation-light WS field types.**
+  `WireDecimal` / `WireInt64` / `WireLevels` / `WireToken` are decoded by
+  registered jsoniter type decoders straight from the iterator buffer (no
+  intermediate strings; shared zero decimals for the `"0"` sizes of book
+  deletes), `UnmarshalWire` matches object keys case-sensitively so jsoniter
+  stops allocating every key. Ticker frame 62 → 16 allocs, books5 frame 112 →
+  41 (what remains is the `big.Int` inside each `decimal`). V2 decode paths
+  are untouched.
+- **Tests.** Contract tests against a mock V3 WS server
+  (`uta/stream_contract_test.go`, `uta/stream_private_contract_test.go`: exact
+  subscribe args, login before subscribe, every live fixture, publicTrade
+  snapshot skip + ordering, books5 stateless, incremental book apply / delete /
+  gap → error + resubscribe, fan-out attach / detach, reconnect callbacks,
+  feeDetail shapes, numbers-for-strings), local-book unit tests incl. a
+  randomised reference-model check (`uta/stream_book_test.go`), benchmarks
+  (`uta/stream_bench_test.go`) and a live unsigned integration test
+  (`integration/uta_stream_test.go`, production + demo host).
+
+- **`utatypes.Instrument.PriceMultiplier` / `QuantityMultiplier`** — the venue's real price tick and
+  quantity step from `GET /api/v3/market/instruments`. They are not always `10^-precision`: on 2026-09-21
+  22 USDT-FUTURES symbols had a quantity step above it (SHIBUSDT `quantityPrecision=0`,
+  `quantityMultiplier=10000`; PEPEUSDT 1000; …), and the venue silently floors an order's quantity to the
+  step. Zero when the venue omits the field.
+
+- **Desk-connector gaps closed (2026-09-23, after the first live UTA run).**
+  - `uta.StreamClient.ReconnectPrivate(reason)` / `ReconnectPublic(reason)`
+    (on top of `ws.Conn.Reconnect`): drop the side's socket so the supervisor
+    dials, logs in and resubscribes afresh; the side's `On*Reconnect`
+    callbacks fire as usual. The hook a desk watchdog needs when the private
+    channel is silent while the socket is alive. Counter
+    `bitget_ws_forced_reconnects_total`. A connection that lived ≥ 30 s
+    resets the reconnect backoff ladder, so a forced redial is prompt.
+  - **Outbound message budget per WS connection** (`Config.WS.WriteRateLimit`,
+    default 10/s = the venue's cap; `-1` disables): Bitget drops a socket
+    that sends more than 10 client messages per second WITHOUT a close
+    frame, and a burst of `Watch*` calls at start-up did exactly that. Writes
+    above the cap are now delayed in `writeFrame` (bounded by
+    `burst / limit` seconds); ping / login / subscribe / unsubscribe all
+    count. Applies to every profile (the gate lives in `internal/ws`).
+  - **Local `books` resync watchdog + backoff.** A resubscribe the venue
+    never answers with a snapshot left the book silent forever (updates are
+    dropped while a resync is pending). Now every resubscribe arms a 10 s
+    watchdog: no snapshot → one error wrapping `ErrOrderBookResync` per
+    attempt and another resync; consecutive resyncs without a snapshot in
+    between back off 50 ms → 100 → … → 30 s, so a misbehaving venue cannot
+    burn the 240 subscribes/hour budget.
+  - REST forwards the V3 quota header `x-mbx-used-remain-limit` (canonical
+    key `X-Mbx-Used-Remain-Limit`) in `RateLimitEvent.Headers`; V3 ships none
+    of the `X-RateLimit-*` family.
+  - `utatypes.Instrument.Type` — the contract kind (`perpetual` / `delivery`,
+    empty on spot). `SymbolType` is the venue's ASSET CLASS (`crypto`), not the
+    contract kind, as the live wire shows; the contract fixture now mirrors
+    the live shape.
+  - Order-entry vocabulary in `uta/types`: `SideBuy/Sell`, `OrderTypeLimit/
+    Market`, `TimeInForceGTC/IOC/FOK/PostOnly`, `PosSideLong/Short`,
+    `ReduceOnlyYes/No` (untyped, the request fields stay `string`).
+    `PlaceOrder` / `PlaceBatchOrders` validate those five fields against the
+    vocabulary and reject `post_only` on a market order, so a typo no longer
+    round-trips to the venue. marginMode / stpMode / trigger types are still
+    forwarded verbatim (their V3 value sets were not verified live).
+  - `doBatch` takes the rate-limit category from the caller:
+    `CloseAllPositions` is a "place" (it submits market orders),
+    `CancelSymbolOrders` a "cancel" with an unknown order count (0).
+
+### Fixed
+
+- **WS login ack without `code` counts as success.** The V3 (UTA) endpoint omits
+  `code` on its acks (live subscribe ack: `{"event":"subscribe","arg":{…},"connId":"…"}`);
+  the private login ack could not be captured without a UTA key, and a strict
+  `code == "0"` would turn a successful login into an endless "login rejected"
+  reconnect loop. `event=login` with code `0` OR no code is now success; a
+  rejected login still arrives as `{"event":"error","code":"30005",…}`
+  (`TestConnPrivateLoginAckWithoutCode`, `TestConnPrivateLoginRejected`).
+- **mix `GetOrderBook`: levels decode on the live wire.** `/api/v2/mix/market/merge-depth`
+  ships `asks` / `bids` as bare JSON numbers (`[[81241.3,6.4858],…]`), not the
+  quoted strings the docs show. The payload was typed `[][]string`, so EVERY call
+  failed (`mix.orderbookPayload.Asks: … ReadString: expects " or n, but found 8`)
+  while the string-typed contract fixture stayed green; a desk session
+  (2026-09-19/20) ran with an empty REST order book for hours. Levels are now
+  `[][]bgcommon.FlexString` parsed by the new `bgcommon.ParseFlexLevels`; pinned
+  by `TestContract_GetOrderBook_NumericLevels` and the live, unsigned
+  `TestLive_Mix_OrderBook` (`-tags integration`).
+- **mix `GetOrderBook`: `limit` is honoured.** The venue accepts exactly
+  `1 / 5 / 15 / 50 / max`; the SDK sent `max15 / max50 / max100 / max200`, which
+  the venue silently ignores and answers with the default 100 rows (verified
+  live 2026-09-21). `resolveDepth` now maps the requested depth to the smallest
+  accepted value that covers it (`max` above 50; depth ≤ 0 → `50`).
+
 ## v2.5.1 — 2026-09-12
 
 ### Fixed

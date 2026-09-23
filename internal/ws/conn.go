@@ -12,9 +12,13 @@ RESPONSIBILITIES:
   - private-only login (op=login, see internal/auth.SignWS);
   - heartbeat (plain-text "ping" frame every PingInterval);
   - subscribe / unsubscribe with a registry keyed by (instType, channel,
-    instId, coin) that survives reconnects;
+    instId, coin) — or (instType, topic, symbol) for V3 / UTA args — that
+    survives reconnects;
   - resubscribe after every successful (re)connect, transparently to caller;
   - dispatch incoming push frames to the per-arg handler;
+  - optional Config.OnConnect hook after every successful (re)connect so
+    a stream client can tell its consumers "the transport was reset,
+    re-seed your state";
   - graceful shutdown via Close() or ctx cancellation.
 
 DESIGN NOTES (DIFFERENCES VS. BYBIT WS):
@@ -75,8 +79,9 @@ var ErrConnClosed = errors.New("ws: connection closed")
 // (domain stream package) constructs it once and passes it to Subscribe;
 // the same Subscription is reused on every reconnect via its Reset hook.
 type Subscription struct {
-	// Arg — instType / channel / instId / coin tuple. Required;
-	// Channel must be non-empty.
+	// Arg — instType / channel / instId / coin tuple (V2) or instType /
+	// topic / symbol tuple (V3). Required; Channel or Topic must be
+	// non-empty.
 	Arg SubscriptionArg
 	// Handler is invoked for every push frame whose arg matches. Args:
 	//
@@ -130,6 +135,25 @@ type Config struct {
 	// ReadBufferSize / WriteBufferSize — gorilla/websocket buffer sizes.
 	ReadBufferSize  int
 	WriteBufferSize int
+	// WriteRateLimit — cap on client messages per second on this
+	// connection (subscribe / unsubscribe / login / ping all count).
+	// Bitget drops a socket that exceeds 10/s WITHOUT a close frame, so
+	// writes above the cap are delayed under writeMu instead. 0 → the
+	// venue's 10/s; < 0 → no gate.
+	WriteRateLimit int
+	// OnConnect — optional hook invoked after every successful connection
+	// cycle: dial ok, login ok (private endpoints) and the resubscribe op
+	// for the surviving registry written to the socket. `reconnect` is
+	// false for the first successful connection of this Conn and true for
+	// every later one.
+	//
+	// The hook runs SYNCHRONOUSLY on the supervisor goroutine, before the
+	// read / ping loops of the new socket start: nothing is read from the
+	// socket while it runs. Implementations must be fast and must not
+	// block (hand long work — a REST re-seed — off to another goroutine).
+	// It is NOT invoked when the dial, the login or the resubscribe write
+	// failed. nil → no-op.
+	OnConnect func(reconnect bool)
 }
 
 // Conn — managing wrapper over a single Bitget WS connection.
@@ -146,8 +170,15 @@ type Conn struct {
 	cancel context.CancelFunc
 
 	writeMu sync.Mutex
+	// gate — outbound message budget; guarded by writeMu.
+	gate *writeGate
 
 	startOnce sync.Once
+
+	// everConnected — true once one connection cycle reached the
+	// OnConnect point. Touched only by the supervisor goroutine
+	// (connectAndRun), hence no lock.
+	everConnected bool
 
 	cReceived bgmet.Counter
 	cDropped  bgmet.Counter
@@ -156,7 +187,17 @@ type Conn struct {
 	cPingErr  bgmet.Counter
 	cAuthOK   bgmet.Counter
 	cAuthFail bgmet.Counter
+	cForced   bgmet.Counter
 }
+
+// DefaultWriteRateLimit — Bitget's documented cap of client messages
+// per second per WebSocket connection.
+const DefaultWriteRateLimit int = 10
+
+// healthyConnectionSpan — a connection that lived at least this long is
+// considered healthy: the next disconnect starts the backoff ladder from
+// the beginning instead of continuing from where the last outage left it.
+const healthyConnectionSpan time.Duration = 30 * time.Second
 
 // pingPayload is the plain-text body Bitget expects on ping frames.
 var pingPayload = []byte(`ping`)
@@ -176,7 +217,11 @@ func NewConn(cfg Config, signer *auth.Signer, log bglog.Logger, mf bgmet.Counter
 	if cfg.LoginTimeout <= 0 {
 		cfg.LoginTimeout = 5 * time.Second
 	}
+	if cfg.WriteRateLimit == 0 {
+		cfg.WriteRateLimit = DefaultWriteRateLimit
+	}
 	return &Conn{
+		gate:      newWriteGate(cfg.WriteRateLimit, time.Second),
 		cfg:       cfg,
 		signer:    signer,
 		logger:    log,
@@ -189,6 +234,7 @@ func NewConn(cfg Config, signer *auth.Signer, log bglog.Logger, mf bgmet.Counter
 		cPingErr:  mf.Counter("bitget_ws_ping_failed_total"),
 		cAuthOK:   mf.Counter("bitget_ws_auth_ok_total"),
 		cAuthFail: mf.Counter("bitget_ws_auth_failed_total"),
+		cForced:   mf.Counter("bitget_ws_forced_reconnects_total"),
 	}
 }
 
@@ -207,7 +253,7 @@ func (c *Conn) Start(ctx context.Context) {
 // subscribe op immediately. Otherwise the subscription waits in the
 // registry and is sent automatically on the next successful (re)connect.
 func (c *Conn) Subscribe(sub *Subscription) error {
-	if sub == nil || sub.Arg.Channel == "" || sub.Handler == nil {
+	if sub == nil || sub.Arg.Name() == "" || sub.Handler == nil {
 		return bgerr.New(bgerr.ErrorKindInvalidRequest, "", "ws: invalid subscription", nil)
 	}
 	var key string = sub.Arg.Key()
@@ -263,6 +309,38 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// Reconnect drops the live socket so the supervisor dials a fresh one —
+// with the usual relogin (private) and resubscribe of the registry. It
+// is the hook for a desk-level watchdog that sees a socket alive but
+// silent (private channel stalled, listenKey-style session gone stale).
+//
+// Returns at once; the reconnect itself is asynchronous and reported
+// through OnConnect(reconnect=true) like any other. No-op (nil) when no
+// socket is up — the supervisor is already dialling. ErrConnClosed after
+// Close. Subscribe / Unsubscribe calls that land in between are queued in
+// the registry and flushed by the resubscribe of the new socket.
+func (c *Conn) Reconnect(reason string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrConnClosed
+	}
+	var s *websocket.Conn = c.socket
+	// Unpublish first: a Subscribe racing with the close must queue, not
+	// write into a socket that is going away.
+	c.socket = nil
+	c.mu.Unlock()
+	if s == nil {
+		return nil
+	}
+	c.cForced.Inc()
+	c.logger.Info("ws: forced reconnect", bglog.Str("url", c.cfg.URL), bglog.Str("reason", reason))
+	// Closing the socket fails the read loop; connectAndRun returns and
+	// supervise dials again after the (reset) backoff.
+	_ = s.Close()
+	return nil
+}
+
 // supervise is the connect → run → backoff loop. Exits on ctx.Done.
 func (c *Conn) supervise(ctx context.Context) {
 	var backoff time.Duration = c.cfg.ReconnectInitialBackoff
@@ -271,9 +349,17 @@ func (c *Conn) supervise(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		var started time.Time = time.Now()
 		var err error = c.connectAndRun(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		// A connection that lived long enough was healthy: do not carry
+		// the ladder of an outage hours ago into this reconnect (matters
+		// for Reconnect(), which expects a prompt redial).
+		if time.Since(started) >= healthyConnectionSpan {
+			backoff = c.cfg.ReconnectInitialBackoff
+			attempt = 0
 		}
 		if err != nil {
 			c.logger.Warn("ws: connection error, will reconnect",
@@ -344,6 +430,7 @@ func (c *Conn) connectAndRun(ctx context.Context) error {
 	}
 
 	// Resubscribe everything that survived the previous disconnect.
+	var resubscribeOK bool = true
 	if len(subsCopy) > 0 {
 		var argsBatch []SubscriptionArg = make([]SubscriptionArg, len(subsCopy))
 		var i int
@@ -351,7 +438,21 @@ func (c *Conn) connectAndRun(ctx context.Context) error {
 			argsBatch[i] = subsCopy[i].Arg
 		}
 		if err = c.sendOp(socket, "subscribe", argsBatch); err != nil {
+			resubscribeOK = false
 			c.logger.Warn("ws: resubscribe failed", bglog.Err(err))
+		}
+	}
+
+	// Connection cycle is complete (dial + login + resubscribe): tell the
+	// owner. Synchronous by contract — the loops below have not started
+	// yet, so the hook observes a quiescent socket. A failed resubscribe
+	// write means the socket is already broken; the read loop will fail
+	// and the NEXT cycle reports the (re)connect instead.
+	if resubscribeOK {
+		var reconnect bool = c.everConnected
+		c.everConnected = true
+		if c.cfg.OnConnect != nil {
+			c.cfg.OnConnect(reconnect)
 		}
 	}
 
@@ -393,6 +494,15 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 	// uses ms, WS doesn't). Sending ms made the server silently drop the
 	// login frame and the client timed out on its login deadline. See
 	// internal/auth/sign.go for the docs trail.
+	//
+	// V3 (UTA, /v3/ws/private) reuses this exact login: same op, same
+	// args, same prehash (timestamp + "GET" + "/user/verify") and the
+	// timestamp is in SECONDS as well. The V3 quick-start TEXT says
+	// "Unix timestamp in milliseconds", but (a) its own Java sample
+	// computes `System.currentTimeMillis() / 1000`, (b) its JSON request
+	// sample carries a 10-digit value ("1538054050") and (c) the
+	// reference client tiagosiebler/bitget-api signs V3 with seconds. V2
+	// shipped the same doc bug. Do not "fix" this to milliseconds.
 	var ts string = c.signer.SecondsTimestamp(time.Time{})
 	var signature string
 	var err error
@@ -499,7 +609,15 @@ func (c *Conn) performLogin(socket *websocket.Conn) error {
 				bglog.Str("code", env.Code.String()))
 			continue
 		}
-		if env.Event == "login" && env.Code == "0" {
+		// Success = event "login" with code 0 OR with no code at all. The
+		// V3 (UTA) endpoint omits `code` on its subscribe acks (captured
+		// live 2026-09-21: {"event":"subscribe","arg":{...},"connId":"..."}),
+		// and its login ack could not be captured without a UTA key — a
+		// strict `code == "0"` would then turn a successful login into an
+		// endless "login rejected" reconnect loop. Accepting the code-less
+		// form is safe: the venue reports a REJECTED login as a separate
+		// frame {"event":"error","code":"30005",...}, never as event=login.
+		if env.Event == "login" && (env.Code == "0" || env.Code == "") {
 			c.logger.Info("ws: login ok")
 			return nil
 		}
@@ -570,11 +688,27 @@ func (c *Conn) readLoop(ctx context.Context, socket *websocket.Conn) error {
 func (c *Conn) handleControl(env *Envelope) {
 	switch env.Event {
 	case "subscribe":
+		if env.Arg.IsV3() {
+			c.logger.Debug("ws: subscribed",
+				bglog.Str("instType", env.Arg.InstType),
+				bglog.Str("topic", env.Arg.Topic),
+				bglog.Str("symbol", env.Arg.Symbol),
+			)
+			return
+		}
 		c.logger.Debug("ws: subscribed",
 			bglog.Str("channel", env.Arg.Channel),
 			bglog.Str("instId", env.Arg.InstID),
 		)
 	case "unsubscribe":
+		if env.Arg.IsV3() {
+			c.logger.Debug("ws: unsubscribed",
+				bglog.Str("instType", env.Arg.InstType),
+				bglog.Str("topic", env.Arg.Topic),
+				bglog.Str("symbol", env.Arg.Symbol),
+			)
+			return
+		}
 		c.logger.Debug("ws: unsubscribed",
 			bglog.Str("channel", env.Arg.Channel),
 			bglog.Str("instId", env.Arg.InstID),
@@ -633,10 +767,17 @@ func (c *Conn) sendOp(socket *websocket.Conn, op string, args []SubscriptionArg)
 
 // writeFrame is a thread-safe text-frame write. gorilla/websocket requires
 // exclusive writes — the dedicated mutex keeps ping/sub/login from
-// stepping on each other.
+// stepping on each other. The write is delayed while it would exceed the
+// per-connection message budget (Config.WriteRateLimit): the venue
+// answers a burst with a silent socket drop, which costs far more than
+// the wait. The delay is bounded by len(burst)/limit seconds and the
+// write deadline is taken AFTER it.
 func (c *Conn) writeFrame(socket *websocket.Conn, msgType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if wait := c.gate.reserve(time.Now()); wait > 0 {
+		time.Sleep(wait)
+	}
 	_ = socket.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout))
 	return socket.WriteMessage(msgType, data)
 }

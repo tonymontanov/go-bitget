@@ -122,13 +122,19 @@ func batchResults(items []batchItemRow) []utatypes.BatchOrderResult {
 	return out
 }
 
-// doBatch posts a top-level array body and decodes the response leniently
-// (bare array or {list|successList|failureList}).
-func (t *TradeClient) doBatch(ctx context.Context, path, scope string, body any, symbols []string) ([]utatypes.BatchOrderResult, error) {
+// doBatch posts a body that yields per-order rows and decodes the response
+// leniently (bare array or {list|successList|failureList}). category /
+// orderCount feed the rate-limit event: cancel-batch is a "cancel" of
+// len(rows) orders, close-positions is a "place" (it submits market
+// orders) of an unknown count, cancel-symbol-order a "cancel" of an
+// unknown count — callers pass 0 when the count is not known up front.
+func (t *TradeClient) doBatch(ctx context.Context, path, scope string, body any,
+	category bitget.RateLimitCategory, orderCount int, symbols []string,
+) ([]utatypes.BatchOrderResult, error) {
 	var raw json.RawMessage
 	var err error
 	if err = t.c.callSigned(ctx, rest.Options{
-		Method: "POST", Path: path, Body: body, Meta: flowMeta(bitget.RateLimitCategoryCancel, len(symbols), symbols...),
+		Method: "POST", Path: path, Body: body, Meta: flowMeta(category, orderCount, symbols...),
 	}, scope, &raw); err != nil {
 		return nil, err
 	}
@@ -178,6 +184,21 @@ func (req PlaceOrderRequest) validate(scope string) error {
 		return errInvalid(scope, "side is required")
 	case req.OrderType == "":
 		return errInvalid(scope, "orderType is required")
+	}
+	// Vocabulary check — a typo in an enum field must not round-trip to
+	// the venue (see utatypes.ValidOrderEntryValue).
+	var fields = [...]struct{ name, value string }{
+		{"side", req.Side}, {"orderType", req.OrderType}, {"timeInForce", req.TimeInForce},
+		{"posSide", req.PosSide}, {"reduceOnly", req.ReduceOnly},
+	}
+	var i int
+	for i = 0; i < len(fields); i++ {
+		if !utatypes.ValidOrderEntryValue(fields[i].name, fields[i].value) {
+			return errInvalid(scope, fields[i].name+" has unknown value "+strconv.Quote(fields[i].value))
+		}
+	}
+	if req.OrderType == utatypes.OrderTypeMarket && req.TimeInForce == utatypes.TimeInForcePostOnly {
+		return errInvalid(scope, "post_only is not valid with a market order")
 	}
 	return nil
 }
@@ -302,7 +323,8 @@ func (t *TradeClient) CancelBatchOrders(ctx context.Context, cancels []CancelBat
 		}
 		symbols = append(symbols, cancels[i].Symbol)
 	}
-	return t.doBatch(ctx, "/api/v3/trade/cancel-batch", "Trade.CancelBatchOrders", cancels, symbols)
+	return t.doBatch(ctx, "/api/v3/trade/cancel-batch", "Trade.CancelBatchOrders", cancels,
+		bitget.RateLimitCategoryCancel, len(cancels), symbols)
 }
 
 // ---------------------------------------------------------------------
@@ -325,7 +347,7 @@ func (t *TradeClient) CancelSymbolOrders(ctx context.Context, category utatypes.
 		symbols = []string{symbol}
 	}
 	return t.doBatch(ctx, "/api/v3/trade/cancel-symbol-order", "Trade.CancelSymbolOrders",
-		cancelSymbolBody{Category: category, Symbol: symbol}, symbols)
+		cancelSymbolBody{Category: category, Symbol: symbol}, bitget.RateLimitCategoryCancel, 0, symbols)
 }
 
 // CloseAllPositions market-closes positions in a futures category
@@ -338,7 +360,10 @@ func (t *TradeClient) CloseAllPositions(ctx context.Context, req ClosePositionsR
 	if req.Symbol != "" {
 		symbols = []string{req.Symbol}
 	}
-	return t.doBatch(ctx, "/api/v3/trade/close-positions", "Trade.CloseAllPositions", req, symbols)
+	// Closing submits market orders: for the rate-limit model this is a
+	// "place", not a "cancel".
+	return t.doBatch(ctx, "/api/v3/trade/close-positions", "Trade.CloseAllPositions", req,
+		bitget.RateLimitCategoryPlace, 0, symbols)
 }
 
 type countdownBody struct {

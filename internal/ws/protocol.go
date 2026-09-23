@@ -12,6 +12,13 @@ OUTBOUND OPS we issue:
 	{"op":"subscribe",  "args":[{"instType":"USDT-FUTURES","channel":"books","instId":"BTCUSDT"}, ...]}
 	{"op":"unsubscribe","args":[{"instType":"USDT-FUTURES","channel":"books","instId":"BTCUSDT"}, ...]}
 
+V3 (UTA) uses the same ops with different arg coordinates — topic / symbol
+instead of channel / instId, lower-case instType on public topics and the
+literal "UTA" on private ones:
+
+	{"op":"subscribe","args":[{"instType":"usdt-futures","topic":"books","symbol":"BTCUSDT"}]}
+	{"op":"subscribe","args":[{"instType":"UTA","topic":"order"}]}
+
 Plus a plain-text "ping" sent every PingInterval as a TEXT frame body
 (NOT a JSON object). Bitget echoes a plain-text "pong" back.
 
@@ -116,18 +123,61 @@ func (c flexCode) String() string { return string(c) }
 //
 // Coin is mostly used by private wallet/balance channels; for trading
 // channels InstID is the symbol or "default" depending on the channel.
+//
+// V3 (UTA) COORDINATES:
+// The V3 protocol names the same concepts differently: `topic` instead of
+// `channel` and `symbol` instead of `instId` (private V3 topics carry no
+// symbol at all). Both coordinate sets live in one struct so a single
+// Conn / Envelope implementation serves both protocol generations:
+//
+//	{InstType:"usdt-futures", Topic:"books5", Symbol:"BTCUSDT"}     // V3 public
+//	{InstType:"UTA",          Topic:"order"}                        // V3 private
+//
+// Every field is `omitempty`, so a V2 arg marshals byte-identically to
+// what it did before the V3 fields existed (pinned by
+// TestSubscriptionArgV2MarshalUnchanged). An arg is V3 when Topic != "".
 type SubscriptionArg struct {
 	InstType string `json:"instType,omitempty"`
 	Channel  string `json:"channel,omitempty"`
 	InstID   string `json:"instId,omitempty"`
 	Coin     string `json:"coin,omitempty"`
+	// Topic — V3 topic name ("ticker", "books5", "order", ...). Empty on V2.
+	Topic string `json:"topic,omitempty"`
+	// Symbol — V3 symbol ("BTCUSDT"). Empty on V2 and on V3 private topics.
+	Symbol string `json:"symbol,omitempty"`
 }
+
+// v3KeyPrefix namespaces V3 registry keys so they can never collide with
+// a V2 key (whose first segment is an instType such as "USDT-FUTURES").
+const v3KeyPrefix = "v3:"
 
 // Key returns a stable, sortable identifier for the arg. Used as the map
 // key inside the subscription registry and as the de-dup key for resubscribe.
+//
+//   - V2 arg (Topic == ""): instType:channel:instId:coin — unchanged.
+//   - V3 arg (Topic != ""): v3:instType:topic:symbol.
+//
+// The venue echoes the subscribe arg verbatim in every push, so the key
+// computed from a push envelope equals the key the subscription was
+// registered under.
 func (a SubscriptionArg) Key() string {
+	if a.Topic != "" {
+		return v3KeyPrefix + a.InstType + ":" + a.Topic + ":" + a.Symbol
+	}
 	// instType:channel:instId:coin (any of the parts may be empty).
 	return a.InstType + ":" + a.Channel + ":" + a.InstID + ":" + a.Coin
+}
+
+// IsV3 reports whether the arg uses the V3 (topic / symbol) coordinates.
+func (a SubscriptionArg) IsV3() bool { return a.Topic != "" }
+
+// Name returns the channel (V2) or topic (V3) name — whichever is set.
+// Used by Conn.Subscribe validation.
+func (a SubscriptionArg) Name() string {
+	if a.Topic != "" {
+		return a.Topic
+	}
+	return a.Channel
 }
 
 // loginArgs is the JSON payload of the "login" op's args[0]. Defined as a
@@ -179,7 +229,7 @@ func (e *Envelope) IsControl() bool {
 }
 
 // IsPush returns true when the envelope describes a data push
-// (action != "" and arg.channel != "").
+// (action != "" and the arg names a V2 channel or a V3 topic).
 func (e *Envelope) IsPush() bool {
-	return e.Action != "" && e.Arg.Channel != ""
+	return e.Action != "" && (e.Arg.Channel != "" || e.Arg.Topic != "")
 }

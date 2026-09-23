@@ -60,6 +60,8 @@ func TestDoSuccessGet(t *testing.T) {
 		captured = r.Clone(r.Context())
 		w.Header().Set("X-RateLimit-Used", "5")
 		w.Header().Set("X-RateLimit-Limit", "20")
+		w.Header().Set("X-Mbx-Used-Remain-Limit", "19") // V3 quota header
+		w.Header().Set("X-Unrelated", "nope")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":"00000","msg":"success","data":{"symbol":"BTCUSDT"},"requestTime":1700000001000}`))
 	}))
@@ -96,6 +98,12 @@ func TestDoSuccessGet(t *testing.T) {
 	// Headers and observer.
 	if hdrs["X-Ratelimit-Used"] != "5" {
 		t.Fatalf("X-Ratelimit-Used header missing: %v", hdrs)
+	}
+	if hdrs["X-Mbx-Used-Remain-Limit"] != "19" {
+		t.Fatalf("X-Mbx-Used-Remain-Limit header missing: %v", hdrs)
+	}
+	if _, leaked := hdrs["X-Unrelated"]; leaked {
+		t.Fatalf("allow-list leaked unrelated header: %v", hdrs)
 	}
 	if observerCalls != 1 {
 		t.Fatalf("observer calls = %d, want 1", observerCalls)
