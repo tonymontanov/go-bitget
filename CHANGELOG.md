@@ -102,6 +102,46 @@ of the existing REST core — plus V2 fixes surfaced by desk sessions.
   `quantityMultiplier=10000`; PEPEUSDT 1000; …), and the venue silently floors an order's quantity to the
   step. Zero when the venue omits the field.
 
+- **Desk-connector gaps closed (2026-09-23, after the first live UTA run).**
+  - `uta.StreamClient.ReconnectPrivate(reason)` / `ReconnectPublic(reason)`
+    (on top of `ws.Conn.Reconnect`): drop the side's socket so the supervisor
+    dials, logs in and resubscribes afresh; the side's `On*Reconnect`
+    callbacks fire as usual. The hook a desk watchdog needs when the private
+    channel is silent while the socket is alive. Counter
+    `bitget_ws_forced_reconnects_total`. A connection that lived ≥ 30 s
+    resets the reconnect backoff ladder, so a forced redial is prompt.
+  - **Outbound message budget per WS connection** (`Config.WS.WriteRateLimit`,
+    default 10/s = the venue's cap; `-1` disables): Bitget drops a socket
+    that sends more than 10 client messages per second WITHOUT a close
+    frame, and a burst of `Watch*` calls at start-up did exactly that. Writes
+    above the cap are now delayed in `writeFrame` (bounded by
+    `burst / limit` seconds); ping / login / subscribe / unsubscribe all
+    count. Applies to every profile (the gate lives in `internal/ws`).
+  - **Local `books` resync watchdog + backoff.** A resubscribe the venue
+    never answers with a snapshot left the book silent forever (updates are
+    dropped while a resync is pending). Now every resubscribe arms a 10 s
+    watchdog: no snapshot → one error wrapping `ErrOrderBookResync` per
+    attempt and another resync; consecutive resyncs without a snapshot in
+    between back off 50 ms → 100 → … → 30 s, so a misbehaving venue cannot
+    burn the 240 subscribes/hour budget.
+  - REST forwards the V3 quota header `x-mbx-used-remain-limit` (canonical
+    key `X-Mbx-Used-Remain-Limit`) in `RateLimitEvent.Headers`; V3 ships none
+    of the `X-RateLimit-*` family.
+  - `utatypes.Instrument.Type` — the contract kind (`perpetual` / `delivery`,
+    empty on spot). `SymbolType` is the venue's ASSET CLASS (`crypto`), not the
+    contract kind, as the live wire shows; the contract fixture now mirrors
+    the live shape.
+  - Order-entry vocabulary in `uta/types`: `SideBuy/Sell`, `OrderTypeLimit/
+    Market`, `TimeInForceGTC/IOC/FOK/PostOnly`, `PosSideLong/Short`,
+    `ReduceOnlyYes/No` (untyped, the request fields stay `string`).
+    `PlaceOrder` / `PlaceBatchOrders` validate those five fields against the
+    vocabulary and reject `post_only` on a market order, so a typo no longer
+    round-trips to the venue. marginMode / stpMode / trigger types are still
+    forwarded verbatim (their V3 value sets were not verified live).
+  - `doBatch` takes the rate-limit category from the caller:
+    `CloseAllPositions` is a "place" (it submits market orders),
+    `CancelSymbolOrders` a "cancel" with an unknown order count (0).
+
 ### Fixed
 
 - **WS login ack without `code` counts as success.** The V3 (UTA) endpoint omits

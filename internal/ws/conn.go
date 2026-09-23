@@ -135,6 +135,12 @@ type Config struct {
 	// ReadBufferSize / WriteBufferSize — gorilla/websocket buffer sizes.
 	ReadBufferSize  int
 	WriteBufferSize int
+	// WriteRateLimit — cap on client messages per second on this
+	// connection (subscribe / unsubscribe / login / ping all count).
+	// Bitget drops a socket that exceeds 10/s WITHOUT a close frame, so
+	// writes above the cap are delayed under writeMu instead. 0 → the
+	// venue's 10/s; < 0 → no gate.
+	WriteRateLimit int
 	// OnConnect — optional hook invoked after every successful connection
 	// cycle: dial ok, login ok (private endpoints) and the resubscribe op
 	// for the surviving registry written to the socket. `reconnect` is
@@ -164,6 +170,8 @@ type Conn struct {
 	cancel context.CancelFunc
 
 	writeMu sync.Mutex
+	// gate — outbound message budget; guarded by writeMu.
+	gate *writeGate
 
 	startOnce sync.Once
 
@@ -179,7 +187,17 @@ type Conn struct {
 	cPingErr  bgmet.Counter
 	cAuthOK   bgmet.Counter
 	cAuthFail bgmet.Counter
+	cForced   bgmet.Counter
 }
+
+// DefaultWriteRateLimit — Bitget's documented cap of client messages
+// per second per WebSocket connection.
+const DefaultWriteRateLimit int = 10
+
+// healthyConnectionSpan — a connection that lived at least this long is
+// considered healthy: the next disconnect starts the backoff ladder from
+// the beginning instead of continuing from where the last outage left it.
+const healthyConnectionSpan time.Duration = 30 * time.Second
 
 // pingPayload is the plain-text body Bitget expects on ping frames.
 var pingPayload = []byte(`ping`)
@@ -199,7 +217,11 @@ func NewConn(cfg Config, signer *auth.Signer, log bglog.Logger, mf bgmet.Counter
 	if cfg.LoginTimeout <= 0 {
 		cfg.LoginTimeout = 5 * time.Second
 	}
+	if cfg.WriteRateLimit == 0 {
+		cfg.WriteRateLimit = DefaultWriteRateLimit
+	}
 	return &Conn{
+		gate:      newWriteGate(cfg.WriteRateLimit, time.Second),
 		cfg:       cfg,
 		signer:    signer,
 		logger:    log,
@@ -212,6 +234,7 @@ func NewConn(cfg Config, signer *auth.Signer, log bglog.Logger, mf bgmet.Counter
 		cPingErr:  mf.Counter("bitget_ws_ping_failed_total"),
 		cAuthOK:   mf.Counter("bitget_ws_auth_ok_total"),
 		cAuthFail: mf.Counter("bitget_ws_auth_failed_total"),
+		cForced:   mf.Counter("bitget_ws_forced_reconnects_total"),
 	}
 }
 
@@ -286,6 +309,38 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// Reconnect drops the live socket so the supervisor dials a fresh one —
+// with the usual relogin (private) and resubscribe of the registry. It
+// is the hook for a desk-level watchdog that sees a socket alive but
+// silent (private channel stalled, listenKey-style session gone stale).
+//
+// Returns at once; the reconnect itself is asynchronous and reported
+// through OnConnect(reconnect=true) like any other. No-op (nil) when no
+// socket is up — the supervisor is already dialling. ErrConnClosed after
+// Close. Subscribe / Unsubscribe calls that land in between are queued in
+// the registry and flushed by the resubscribe of the new socket.
+func (c *Conn) Reconnect(reason string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrConnClosed
+	}
+	var s *websocket.Conn = c.socket
+	// Unpublish first: a Subscribe racing with the close must queue, not
+	// write into a socket that is going away.
+	c.socket = nil
+	c.mu.Unlock()
+	if s == nil {
+		return nil
+	}
+	c.cForced.Inc()
+	c.logger.Info("ws: forced reconnect", bglog.Str("url", c.cfg.URL), bglog.Str("reason", reason))
+	// Closing the socket fails the read loop; connectAndRun returns and
+	// supervise dials again after the (reset) backoff.
+	_ = s.Close()
+	return nil
+}
+
 // supervise is the connect → run → backoff loop. Exits on ctx.Done.
 func (c *Conn) supervise(ctx context.Context) {
 	var backoff time.Duration = c.cfg.ReconnectInitialBackoff
@@ -294,9 +349,17 @@ func (c *Conn) supervise(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		var started time.Time = time.Now()
 		var err error = c.connectAndRun(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		// A connection that lived long enough was healthy: do not carry
+		// the ladder of an outage hours ago into this reconnect (matters
+		// for Reconnect(), which expects a prompt redial).
+		if time.Since(started) >= healthyConnectionSpan {
+			backoff = c.cfg.ReconnectInitialBackoff
+			attempt = 0
 		}
 		if err != nil {
 			c.logger.Warn("ws: connection error, will reconnect",
@@ -704,10 +767,17 @@ func (c *Conn) sendOp(socket *websocket.Conn, op string, args []SubscriptionArg)
 
 // writeFrame is a thread-safe text-frame write. gorilla/websocket requires
 // exclusive writes — the dedicated mutex keeps ping/sub/login from
-// stepping on each other.
+// stepping on each other. The write is delayed while it would exceed the
+// per-connection message budget (Config.WriteRateLimit): the venue
+// answers a burst with a silent socket drop, which costs far more than
+// the wait. The delay is bounded by len(burst)/limit seconds and the
+// write deadline is taken AFTER it.
 func (c *Conn) writeFrame(socket *websocket.Conn, msgType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if wait := c.gate.reserve(time.Now()); wait > 0 {
+		time.Sleep(wait)
+	}
 	_ = socket.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout))
 	return socket.WriteMessage(msgType, data)
 }

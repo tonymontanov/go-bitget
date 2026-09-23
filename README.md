@@ -37,7 +37,7 @@ The **UTA (V3)** family ships its REST core under v2.5 and its WebSocket
 | **v2.0-m5** `spot/` private WebSocket | done | `StreamClient.WatchOrders` over lazy signed `*ws.Conn` (`cfg.WS.PrivateURL`); subscribe arg pins `instType=SPOT, channel=orders, instId=default` (Bitget V2 rejects per-symbol with `code=30001`); per-symbol semantics preserved client-side via the `instId` filter inside the dispatcher. Wire row reuses `bgcommon.FlexString` + `ParseDecimalOrZero` / `ParseInt64OrZero`; spot row omits mix-only fields (`tradeSide` / `posSide` / `marginCoin` / `marginMode` / `leverage` / `reduceOnly`). Auth pre-flight returns `ErrorKindAuth`; client-side validation returns `ErrorKindInvalidRequest`. `WatchPositions` intentionally omitted (cash-only spot has no positions); `WatchAccount` / `WatchFills` deferred to M6. |
 | **v2.0-m6** mix↔spot private-WS symmetry | done | `spot.StreamClient.WatchAccount` over `coin="default"` + client-side per-coin filter; profile-local `spottypes.AccountUpdate` (per-asset, distinct from mix's per-margin-coin `roottypes.Balance`). `spot.StreamClient.WatchFills` + `mix.StreamClient.WatchFills` over `instId="default"` + client-side symbol filter; profile-local `spottypes.FillUpdate` / `mixtypes.FillUpdate` (mix carries `clientOid` / `posMode` / `tradeSide` / `profit` that spot does not). New `bgcommon.WSFeeDetail` + `ParseFeeDetailList` consumed by both profiles — the one piece of the fill push that has byte-identical wire across mix and spot. Audit pass on `mix/stream-private.go` extended contract-test coverage to M5 parity (orders filter / default-symbol / numeric-fields regression guards added; mix already implemented the M5 discipline since v1.2.x PARTIUSDT fixes). After M6 the mix and spot private surfaces are fully symmetric except `WatchPositions`, which is mix-only by venue contract. |
 | **v2.5** `uta/` profile (REST core) + demo | done | V3 Public / Account / Trade / Position / Strategy, hedge mode, `Config.Demo` (`paptrading`) |
-| **v2.6** `uta/` V3 WebSocket | done (private topics: docs-only, need a live key run) | `uta.StreamClient`: `WatchTicker` / `WatchPublicTrades` / `WatchOrderBook` (books1/5/50 stateless; `books` local incremental book on the seq/pseq chain, resync on gap) + private account-wide `WatchOrders` / `WatchFills` / `WatchPositions` / `WatchAccount`; multi-handler fan-out over one wire subscription; `OnPublicReconnect` / `OnPrivateReconnect`; `Config.WS.UTAPublicURL` / `UTAPrivateURL` (demo host via `Config.Demo`). |
+| **v2.6** `uta/` V3 WebSocket | done (private topics verified live 2026-09-23: order / fill / position / account on USDT-FUTURES + SPOT) | `uta.StreamClient`: `WatchTicker` / `WatchPublicTrades` / `WatchOrderBook` (books1/5/50 stateless; `books` local incremental book on the seq/pseq chain, resync on gap) + private account-wide `WatchOrders` / `WatchFills` / `WatchPositions` / `WatchAccount`; multi-handler fan-out over one wire subscription; `OnPublicReconnect` / `OnPrivateReconnect`; `Config.WS.UTAPublicURL` / `UTAPrivateURL` (demo host via `Config.Demo`). |
 
 ## Quick start
 
@@ -282,7 +282,15 @@ _ = stream.WatchAccount(ctx, func(a utatypes.AccountAssets) {}, nil)
 // down: re-seed over REST after every private RE-connect.
 removeHook := stream.OnPrivateReconnect(func() { /* signal a REST re-seed; do not block */ })
 defer removeHook()
+
+// A watchdog that sees own fills over REST but no private pushes can force
+// a fresh socket (relogin + resubscribe; the hook above fires afterwards).
+_ = stream.ReconnectPrivate("private channel silent")
 ```
+
+Outbound messages are gated at the venue's 10 per second per connection
+(`Config.WS.WriteRateLimit`): a burst of `Watch*` calls is spread out
+instead of getting the socket dropped without a close frame.
 
 Unlike the V2 profiles, several `Watch*` calls for the same wire arg
 **share one wire subscription**: each handler detaches with its own `ctx`
@@ -528,7 +536,9 @@ non-blocking send to a buffered channel is the typical shape.
 
 The headers map carries `X-RateLimit-Limit` / `X-RateLimit-Remaining` /
 `X-RateLimit-Used` / `X-RateLimit-Reset` / `Retry-After` when Bitget
-returns them.
+returns them. V3 (UTA) endpoints send none of those; their quota signal
+is `X-Mbx-Used-Remain-Limit` (remaining requests in the window), forwarded
+under that key.
 
 ## WebSocket
 

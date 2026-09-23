@@ -726,6 +726,69 @@ func TestContract_Stream_WatchOrderBook_IncrementalApplyGapResync(t *testing.T) 
 	}
 }
 
+// A resubscribe the venue never answers with a snapshot must not leave
+// the book silent forever: the watchdog surfaces one error per attempt
+// and resubscribes again (with backoff); the first snapshot ends it.
+func TestContract_Stream_WatchOrderBook_ResyncWatchdog(t *testing.T) {
+	var mock *utaMockServer = newUTAMockServer(t)
+	var c *Client = newStreamTestClient(t, mock, false)
+	c.Stream().bookResyncTimeout = 150 * time.Millisecond
+
+	var got collector[utatypes.OrderBookUpdate]
+	var errs collector[error]
+	if err := c.Stream().WatchOrderBook(context.Background(), utatypes.CategoryUSDTFutures, "BTCUSDT", 200, got.add, errs.add); err != nil {
+		t.Fatalf("WatchOrderBook: %v", err)
+	}
+	mock.waitOps(t, "subscribe", booksArg, 1)
+	mock.push(t, booksFrame("snapshot", `[["80810.4","0.8523"]]`, `[["80810.3","1.0943"]]`, 100, 0))
+	waitFor(t, time.Second, "snapshot delivery", func() bool { return got.len() == 1 })
+
+	// Break the chain → resync #1 (unsub 1, sub 2). The venue stays mute.
+	mock.push(t, booksFrame("update", `[["80812","1"]]`, `[]`, 200, 150))
+	mock.waitOps(t, "unsubscribe", booksArg, 1)
+	mock.waitOps(t, "subscribe", booksArg, 2)
+	if errs.len() != 1 {
+		t.Fatalf("chain break must surface one error, got %d", errs.len())
+	}
+
+	// Watchdog: no snapshot within the timeout → second error, resync #2.
+	waitFor(t, 2*time.Second, "watchdog error", func() bool { return errs.len() == 2 })
+	if !errors.Is(errs.snapshot()[1], ErrOrderBookResync) {
+		t.Fatalf("watchdog error must wrap ErrOrderBookResync: %v", errs.snapshot()[1])
+	}
+	mock.waitOps(t, "unsubscribe", booksArg, 2)
+	mock.waitOps(t, "subscribe", booksArg, 3)
+	if got.len() != 1 {
+		t.Fatalf("no delivery may happen without a snapshot, got %d", got.len())
+	}
+
+	// The venue answers this time: the book resumes and the watchdog is
+	// disarmed — no further error, no further resubscribe.
+	mock.push(t, booksFrame("snapshot", `[["80900","1"]]`, `[["80899","2"]]`, 300, 0))
+	waitFor(t, time.Second, "post-watchdog snapshot", func() bool { return got.len() == 2 })
+	time.Sleep(400 * time.Millisecond)
+	if errs.len() != 2 || mock.countOps("subscribe", booksArg) != 3 {
+		t.Fatalf("watchdog kept firing after the snapshot: errors=%d subscribes=%d",
+			errs.len(), mock.countOps("subscribe", booksArg))
+	}
+	mock.push(t, booksFrame("update", `[["80901","3"]]`, `[]`, 350, 300))
+	waitFor(t, time.Second, "post-watchdog update", func() bool { return got.len() == 3 })
+}
+
+func TestResyncPauseBackoff(t *testing.T) {
+	t.Parallel()
+	var want []time.Duration = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+	var i int32
+	for i = 0; i < int32(len(want)); i++ {
+		if got := resyncPauseFor(i); got != want[i] {
+			t.Fatalf("attempt %d: pause = %v, want %v", i, got, want[i])
+		}
+	}
+	if got := resyncPauseFor(60); got != bookResyncMaxPause {
+		t.Fatalf("attempt 60: pause = %v, want the cap %v", got, bookResyncMaxPause)
+	}
+}
+
 func TestContract_Stream_WatchOrderBook_PseqZeroAndUpdateBeforeSnapshot(t *testing.T) {
 	var mock *utaMockServer = newUTAMockServer(t)
 	var c *Client = newStreamTestClient(t, mock, false)
@@ -912,6 +975,52 @@ func TestContract_Stream_OnPublicReconnect(t *testing.T) {
 	}
 	// nil is tolerated.
 	c.Stream().OnPublicReconnect(nil)()
+}
+
+// ReconnectPublic / ReconnectPrivate drop the socket of ONE side: the
+// registry is resubscribed on the fresh socket and the side's reconnect
+// callbacks fire; a side without a connection is a no-op; a closed client
+// rejects the call.
+func TestContract_Stream_ForcedReconnect(t *testing.T) {
+	var mock *utaMockServer = newUTAMockServer(t)
+	var c *Client = newStreamTestClient(t, mock, true)
+	const arg string = `{"instType":"usdt-futures","topic":"ticker","symbol":"BTCUSDT"}`
+
+	var calls collector[string]
+	defer c.Stream().OnPublicReconnect(func() { calls.add("public") })()
+	var private collector[string]
+	defer c.Stream().OnPrivateReconnect(func() { private.add("private") })()
+
+	// No private socket yet → nothing to reconnect.
+	if err := c.Stream().ReconnectPrivate("nothing up"); err != nil {
+		t.Fatalf("ReconnectPrivate without a socket: %v", err)
+	}
+
+	if err := c.Stream().WatchTicker(context.Background(), utatypes.CategoryUSDTFutures, "BTCUSDT", func(utatypes.TickerUpdate) {}, nil); err != nil {
+		t.Fatalf("WatchTicker: %v", err)
+	}
+	mock.waitOps(t, "subscribe", arg, 1)
+	var before int = mock.connCount()
+
+	if err := c.Stream().ReconnectPublic("watchdog"); err != nil {
+		t.Fatalf("ReconnectPublic: %v", err)
+	}
+	mock.waitOps(t, "subscribe", arg, 2)
+	waitFor(t, time.Second, "public reconnect callback", func() bool { return calls.len() == 1 })
+	if mock.connCount() != before+1 {
+		t.Fatalf("connections = %d, want %d (one fresh socket)", mock.connCount(), before+1)
+	}
+	if private.len() != 0 {
+		t.Fatalf("a public reconnect fired the PRIVATE callbacks: %v", private.snapshot())
+	}
+
+	_ = c.Stream().Close()
+	if err := c.Stream().ReconnectPublic("closed"); err == nil {
+		t.Fatal("ReconnectPublic after Close: want error")
+	}
+	if err := c.Stream().ReconnectPrivate("closed"); err == nil {
+		t.Fatal("ReconnectPrivate after Close: want error")
+	}
 }
 
 // ---------------------------------------------------------------------

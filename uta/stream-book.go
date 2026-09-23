@@ -84,7 +84,21 @@ const defaultBookDepth int = 50
 
 // bookResyncPause separates the unsubscribe from the re-subscribe of a
 // resync: the venue rejects a back-to-back unsub / sub of the same arg.
+// It is the FIRST pause; every consecutive resync of the same book
+// without a snapshot in between doubles it (see bookResyncMaxPause) so a
+// venue that keeps breaking the chain, or keeps not answering the
+// resubscribe, cannot make the SDK burn its 240 subscribes/hour budget.
 const bookResyncPause time.Duration = 50 * time.Millisecond
+
+// bookResyncMaxPause caps the doubling of bookResyncPause.
+const bookResyncMaxPause time.Duration = 30 * time.Second
+
+// bookResyncTimeout — how long after the resubscribe the snapshot may
+// take. When it does not arrive the book would otherwise stay silent
+// forever (updates are dropped while resyncPending); instead one error is
+// surfaced and the resync is repeated with the next backoff step.
+// StreamClient.bookResyncTimeout carries it so tests can shorten it.
+const bookResyncTimeout time.Duration = 10 * time.Second
 
 // initialBookCapacity — levels pre-allocated per side of a local book
 // (the venue's snapshot holds up to 1000).
@@ -131,6 +145,42 @@ type bookSub struct {
 	viewDepth atomic.Int64
 	// resyncing — a resync round-trip is in flight (de-dup flag).
 	resyncing atomic.Bool
+	// resyncAttempt — consecutive resyncs without a snapshot in between;
+	// selects the backoff step. Reset by the read goroutine on a snapshot.
+	resyncAttempt atomic.Int32
+	// snapshotGen — bumped by the read goroutine on every snapshot of the
+	// local book; the resync watchdog compares it to see whether the
+	// resubscribe was answered.
+	snapshotGen atomic.Uint64
+	// watchdog — the timer armed after a resubscribe; stopped on the
+	// snapshot. Swapped atomically so the read goroutine never blocks.
+	watchdog atomic.Pointer[time.Timer]
+}
+
+// noteSnapshot is called on the read goroutine when the local book
+// received a snapshot: the chain is healthy again, the backoff ladder
+// restarts and the pending watchdog (if any) is disarmed.
+func (b *bookSub) noteSnapshot() {
+	b.snapshotGen.Add(1)
+	b.resyncAttempt.Store(0)
+	if t := b.watchdog.Swap(nil); t != nil {
+		t.Stop()
+	}
+}
+
+// resyncPauseFor returns the pause before the resubscribe of the given
+// consecutive attempt (0-based): bookResyncPause doubled per attempt,
+// capped at bookResyncMaxPause.
+func resyncPauseFor(attempt int32) time.Duration {
+	var pause time.Duration = bookResyncPause
+	var i int32
+	for i = 0; i < attempt && pause < bookResyncMaxPause; i++ {
+		pause *= 2
+	}
+	if pause > bookResyncMaxPause {
+		pause = bookResyncMaxPause
+	}
+	return pause
 }
 
 // setDepth / dropDepth maintain viewDepth; the caller holds public.mu.
@@ -327,6 +377,9 @@ func (s *StreamClient) handleBooksFrame(b *bookSub, action string, payload []byt
 		var outcome bookOutcome
 		var reason string
 		outcome, reason, update.Asks, update.Bids = b.book.apply(action, row, viewDepth)
+		if action == actionSnapshot {
+			b.noteSnapshot()
+		}
 		switch outcome {
 		case bookApplied:
 			b.deliver(update)
@@ -375,17 +428,24 @@ func copyWireLevels(asks, bids codec.WireLevels, depth int) ([]utatypes.PriceLev
 // per subscription; a no-op once the last handler detached or the client
 // was closed.
 //
-// It is called from the connection's READ goroutine, so it must not
-// block: the de-dup flag is atomic and both wire ops run in the spawned
-// goroutine, under public.mu, which serialises them with attach / detach
-// of the same arg. While the round-trip is in flight the local book drops
-// updates silently (localBook.resyncPending).
+// It is called from the connection's READ goroutine (and from the resync
+// watchdog), so it must not block: the de-dup flag is atomic and both
+// wire ops run in the spawned goroutine, under public.mu, which
+// serialises them with attach / detach of the same arg. While the
+// round-trip is in flight the local book drops updates silently
+// (localBook.resyncPending).
+//
+// Consecutive resyncs without a snapshot in between back off
+// (resyncPauseFor), and every resubscribe arms a watchdog: when the
+// snapshot does not arrive within bookResyncTimeout the book would stay
+// silent forever, so one error is surfaced and the resync is repeated.
 func (s *StreamClient) scheduleBookResync(b *bookSub) {
 	if !b.resyncing.CompareAndSwap(false, true) {
 		return
 	}
 	var side *connSide = &s.public
 	var key string = b.arg.Key()
+	var attempt int32 = b.resyncAttempt.Add(1) - 1
 
 	go func() {
 		side.mu.Lock()
@@ -399,7 +459,7 @@ func (s *StreamClient) scheduleBookResync(b *bookSub) {
 		side.mu.Unlock()
 
 		select {
-		case <-time.After(bookResyncPause):
+		case <-time.After(resyncPauseFor(attempt)):
 		case <-s.closed:
 		}
 
@@ -416,8 +476,39 @@ func (s *StreamClient) scheduleBookResync(b *bookSub) {
 		// attached to it.
 		if err := conn.Subscribe(b.sub); err != nil {
 			surfaceError(s, &b.wireSub, "resubscribe after resync", err)
+			return
+		}
+		var gen uint64 = b.snapshotGen.Load()
+		var timer *time.Timer = time.AfterFunc(s.bookResyncTimeout, func() {
+			s.bookResyncWatchdog(b, gen, attempt+1)
+		})
+		if old := b.watchdog.Swap(timer); old != nil {
+			old.Stop()
 		}
 	}()
+}
+
+// bookResyncWatchdog fires bookResyncTimeout after a resubscribe. gen is
+// the snapshot generation at the time of the resubscribe: unchanged
+// means the venue never answered. The book is still in its silent-drop
+// window, so the only way out is another resync — surfaced as one error
+// per attempt so the owner sees the venue misbehaving.
+func (s *StreamClient) bookResyncWatchdog(b *bookSub, gen uint64, attempts int32) {
+	if b.snapshotGen.Load() != gen {
+		return
+	}
+	var side *connSide = &s.public
+	side.mu.Lock()
+	var live bool = !side.closed && s.books[b.arg.Key()] == b
+	side.mu.Unlock()
+	if !live {
+		return
+	}
+	surfaceError(s, &b.wireSub, "resync snapshot did not arrive",
+		bitget.NewError(bitget.ErrorKindUnknown, "",
+			"uta."+b.scope+": "+b.symbol+": no snapshot within "+s.bookResyncTimeout.String()+
+				" of the resubscribe (attempt "+strconv.Itoa(int(attempts))+"), resubscribing again", ErrOrderBookResync))
+	s.scheduleBookResync(b)
 }
 
 // ---------------------------------------------------------------------

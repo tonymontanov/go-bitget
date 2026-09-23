@@ -588,15 +588,31 @@ V2 behaviour; self-heals through the login-rejected → reconnect path).
 - `utatypes.Instrument.PriceMultiplier / QuantityMultiplier` — the venue's real tick /
   quantity step. 22 USDT-FUTURES symbols have a step above `10^-quantityPrecision`
   (SHIBUSDT 10000 …); the venue silently floors quantity to the step.
-- Desk-connector gaps reported while wiring `uta` into the trading core, NOT done yet:
+- Desk-connector gaps reported while wiring `uta` into the trading core:
   (a) the REST client forwards only `X-RateLimit-*` / `Retry-After`; V3 reports the
   remaining quota in `x-mbx-used-remain-limit`, so the desk limiter has no live V3
-  header state; (b) no API to force a private-socket reconnect (the desk's
-  `PrivateStreamResetter` cannot be implemented); (c) reconnect hooks run on the
-  supervisor goroutine and must not block — a blocking-safe variant (or a reset event
-  on the reader goroutine) would let the desk deliver its StreamReset from one
-  goroutine; (d) `doBatch` tags close-positions / cancel-symbol-order as category
-  "cancel"; (e) batch row decoder reads only `code` / `msg`.
+  header state — **DONE 2026-09-23** (forwarded as `X-Mbx-Used-Remain-Limit`; the
+  header is on every /api/v3 response, public ones included); (b) no API to force a
+  private-socket reconnect (the desk's `PrivateStreamResetter` cannot be implemented)
+  — **DONE** (`StreamClient.ReconnectPrivate/ReconnectPublic`, `ws.Conn.Reconnect`);
+  (c) reconnect hooks run on the supervisor goroutine and must not block — a
+  blocking-safe variant (or a reset event on the reader goroutine) would let the
+  desk deliver its StreamReset from one goroutine — NOT done; (d) `doBatch` tags
+  close-positions / cancel-symbol-order as category "cancel" — **DONE** (close =
+  place, cancel-symbol = cancel with count 0); (e) batch row decoder reads only
+  `code` / `msg` — NOT done (no live evidence of further row fields yet).
+- **Landed 2026-09-23 after the first live UTA run** (branch `fix/uta-desk-gaps`;
+  live smoke: public + private REST/WS, place / modify / cancel / batch, fills on
+  USDT-FUTURES and SPOT, one-way + hedge): open item (2) above — the resync
+  watchdog + backoff (`bookResyncTimeout` 10 s, pause 50 ms doubling to 30 s);
+  outbound WS message gate 10/s (`Config.WS.WriteRateLimit`) — the venue drops a
+  socket above 10 msg/s without a close frame, a start-up burst of `Watch*` hit it;
+  `Instrument.Type` (the live `symbolType` is the asset class `crypto`, the
+  contract kind is in `type`); order-entry vocabulary constants + client-side
+  validation in `PlaceOrder`. Still open from the live run, in the CORE not the
+  SDK: the core's `CancelBatchOrders` swallows per-row "order not found" by
+  design; the venue sends `order`/Filled BEFORE the `fill` row (the core merges
+  them in its connector).
 
 ### 📋 Planned
 

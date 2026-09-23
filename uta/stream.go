@@ -79,6 +79,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	bitget "github.com/tonymontanov/go-bitget/v2"
 	"github.com/tonymontanov/go-bitget/v2/internal/bgmet"
@@ -331,19 +332,24 @@ type StreamClient struct {
 	fills     map[string]*fillSub
 	positions map[string]*positionSub
 	accounts  map[string]*accountSub
+
+	// bookResyncTimeout — see the const of the same name; a field so
+	// tests can shorten it.
+	bookResyncTimeout time.Duration
 }
 
 func newStreamClient(c *Client) *StreamClient {
 	return &StreamClient{
-		c:         c,
-		closed:    make(chan struct{}),
-		tickers:   make(map[string]*tickerSub, 8),
-		trades:    make(map[string]*tradeSub, 8),
-		books:     make(map[string]*bookSub, 8),
-		orders:    make(map[string]*orderSub, 1),
-		fills:     make(map[string]*fillSub, 1),
-		positions: make(map[string]*positionSub, 1),
-		accounts:  make(map[string]*accountSub, 1),
+		c:                 c,
+		closed:            make(chan struct{}),
+		bookResyncTimeout: bookResyncTimeout,
+		tickers:           make(map[string]*tickerSub, 8),
+		trades:            make(map[string]*tradeSub, 8),
+		books:             make(map[string]*bookSub, 8),
+		orders:            make(map[string]*orderSub, 1),
+		fills:             make(map[string]*fillSub, 1),
+		positions:         make(map[string]*positionSub, 1),
+		accounts:          make(map[string]*accountSub, 1),
 	}
 }
 
@@ -391,6 +397,35 @@ func (s *StreamClient) OnPrivateReconnect(fn func()) (remove func()) {
 	return s.private.addHook(fn)
 }
 
+// ReconnectPrivate drops the private socket so it is dialled, logged in
+// and resubscribed afresh; OnPrivateReconnect callbacks fire when the
+// new socket is up. It is the hook for a watchdog that sees the private
+// channel silent while the socket is alive (own fills arriving over
+// REST but no order / position pushes). Returns at once; nil when no
+// private socket exists yet; an ErrorKindInvalidRequest error after
+// Close. reason is logged only.
+func (s *StreamClient) ReconnectPrivate(reason string) error {
+	return s.reconnectSide(&s.private, "Stream.ReconnectPrivate", reason)
+}
+
+// ReconnectPublic — same as ReconnectPrivate for the public socket
+// (local `books` order books are rebuilt from the fresh snapshots).
+func (s *StreamClient) ReconnectPublic(reason string) error {
+	return s.reconnectSide(&s.public, "Stream.ReconnectPublic", reason)
+}
+
+func (s *StreamClient) reconnectSide(side *connSide, scope, reason string) error {
+	side.mu.Lock()
+	defer side.mu.Unlock()
+	if side.closed {
+		return errInvalid(scope, "stream client is closed")
+	}
+	if side.conn == nil {
+		return nil
+	}
+	return side.conn.Reconnect(reason)
+}
+
 // ensureConn returns the lazily-constructed connection of the given side.
 // The first call builds the ws.Conn and starts its supervisor (the dial
 // itself is asynchronous); later calls return the same instance.
@@ -427,6 +462,7 @@ func (s *StreamClient) ensureConn(side *connSide, private bool, scope string) (*
 		ReconnectJitter:         cfg.WS.ReconnectJitter,
 		ReadBufferSize:          cfg.WS.ReadBufferSize,
 		WriteBufferSize:         cfg.WS.WriteBufferSize,
+		WriteRateLimit:          cfg.WS.WriteRateLimit,
 		OnConnect:               side.onConnect,
 	}
 
