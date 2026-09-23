@@ -100,6 +100,7 @@ type instrumentRow struct {
 	MakerFeeRate        string `json:"makerFeeRate"`
 	TakerFeeRate        string `json:"takerFeeRate"`
 	SymbolType          string `json:"symbolType"`
+	Type                string `json:"type"`
 	MinLeverage         string `json:"minLeverage"`
 	MaxLeverage         string `json:"maxLeverage"`
 	FundInterval        string `json:"fundInterval"`
@@ -149,6 +150,7 @@ func (p *PublicClient) GetInstruments(ctx context.Context, category utatypes.Cat
 			QuantityPrecision: i32(r.QuantityPrecision),
 			QuotePrecision:    i32(r.QuotePrecision),
 			SymbolType:        r.SymbolType,
+			Type:              r.Type,
 			FundInterval:      r.FundInterval,
 			LaunchTimeMs:      i64(r.LaunchTime),
 			DeliveryTime:      i64(r.DeliveryTime),

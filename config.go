@@ -190,6 +190,13 @@ type WsConfig struct {
 	// Defaults: 64KB / 16KB.
 	ReadBufferSize  int
 	WriteBufferSize int
+
+	// WriteRateLimit — cap on client messages per second per WebSocket
+	// connection (subscribe / unsubscribe / login / ping). Bitget drops a
+	// socket that sends more than 10/s without a close frame; the SDK
+	// delays writes above the cap instead. Default 10; -1 disables the
+	// gate (tests / a venue-side exemption).
+	WriteRateLimit int
 }
 
 // OrderbookConfig — orderbook engine parameters. Used by the M2 engine
@@ -233,6 +240,7 @@ func DefaultConfig() Config {
 			ReconnectJitter:         0.2,
 			ReadBufferSize:          64 * 1024,
 			WriteBufferSize:         16 * 1024,
+			WriteRateLimit:          10,
 		},
 		Orderbook: OrderbookConfig{
 			MaxDepth: 200,
@@ -321,6 +329,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.WS.WriteBufferSize == 0 {
 		c.WS.WriteBufferSize = def.WS.WriteBufferSize
+	}
+	if c.WS.WriteRateLimit == 0 {
+		c.WS.WriteRateLimit = def.WS.WriteRateLimit
 	}
 
 	if c.Orderbook.MaxDepth == 0 {

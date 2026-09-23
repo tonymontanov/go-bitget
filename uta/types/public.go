@@ -49,7 +49,13 @@ type Instrument struct {
 	// Futures-specific (zero for spot / margin).
 	MakerFeeRate decimal.Decimal
 	TakerFeeRate decimal.Decimal
-	SymbolType   string
+	// SymbolType is the venue's asset class ("crypto", ...) — NOT the
+	// contract kind. Live 2026-09-23: every USDT-FUTURES row carries
+	// symbolType="crypto"; the perpetual/delivery distinction is in Type.
+	SymbolType string
+	// Type is the contract kind: "perpetual" or "delivery" for futures,
+	// empty for spot / margin (the venue omits the field there).
+	Type         string
 	MinLeverage  decimal.Decimal
 	MaxLeverage  decimal.Decimal
 	FundInterval string

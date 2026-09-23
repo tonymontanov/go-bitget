@@ -398,6 +398,73 @@ func TestConnReconnectResubscribe(t *testing.T) {
 	}
 }
 
+// TestConnForcedReconnect: Reconnect drops the live socket, the
+// supervisor dials again and resubscribes the registry; the old socket is
+// closed from OUR side (the mock sees a read error). Before Start / after
+// Close the call is a no-op / ErrConnClosed.
+func TestConnForcedReconnect(t *testing.T) {
+	var srv *mockServer = newMockServer(t)
+	defer srv.close()
+
+	var c *Conn = NewConn(Config{
+		URL:                     srv.wsURL(),
+		HandshakeTimeout:        2 * time.Second,
+		ReadTimeout:             2 * time.Second,
+		WriteTimeout:            2 * time.Second,
+		PingInterval:            300 * time.Millisecond,
+		ReconnectInitialBackoff: 30 * time.Millisecond,
+		ReconnectMaxBackoff:     200 * time.Millisecond,
+	}, nil, nil, nil)
+	defer c.Close()
+
+	// No socket yet → nothing to drop.
+	if err := c.Reconnect("before start"); err != nil {
+		t.Fatalf("Reconnect before Start: %v", err)
+	}
+
+	c.Start(context.Background())
+	var sub *Subscription = &Subscription{
+		Arg:     SubscriptionArg{InstType: "USDT-FUTURES", Channel: "ticker", InstID: "BTCUSDT"},
+		Handler: func(SubscriptionArg, string, []byte, int64, int64) {},
+	}
+	if err := c.Subscribe(sub); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	select {
+	case <-srv.subs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial subscribe missing")
+	}
+	select {
+	case <-srv.conns:
+	case <-time.After(time.Second):
+		t.Fatal("no captured conn")
+	}
+
+	if err := c.Reconnect("test"); err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+	// A new socket comes up and the registry is resubscribed on it.
+	select {
+	case <-srv.conns:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no second connection after Reconnect")
+	}
+	select {
+	case got := <-srv.subs:
+		if got.Channel != "ticker" {
+			t.Fatalf("re-subscribe arg = %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("registry not resubscribed after Reconnect")
+	}
+
+	_ = c.Close()
+	if err := c.Reconnect("after close"); err != ErrConnClosed {
+		t.Fatalf("Reconnect after Close = %v, want ErrConnClosed", err)
+	}
+}
+
 // TestSubscribeBeforeStart ensures Subscribe is allowed before Start: the
 // arg is queued and dispatched on the first connect.
 func TestSubscribeBeforeStart(t *testing.T) {
