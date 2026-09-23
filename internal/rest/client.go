@@ -417,12 +417,18 @@ func (c *Client) applyHeaders(req *http.Request, opts Options, method, body, sig
 // rateLimitHeaderAllowList enumerates the headers Bitget ships with rate-
 // limit metadata. We hard-code the list to avoid leaking unrelated headers
 // (cookies, auth) into observer maps that may be logged downstream.
+//
+// V3 (UTA) does not send the X-RateLimit-* family; its only live quota
+// signal is x-mbx-used-remain-limit — the remaining budget of the
+// endpoint's window (observed 2026-09-23 on every /api/v3 response,
+// public ones included).
 var rateLimitHeaderAllowList = map[string]struct{}{
-	"x-ratelimit-limit":     {},
-	"x-ratelimit-remaining": {},
-	"x-ratelimit-reset":     {},
-	"x-ratelimit-used":      {},
-	"retry-after":           {},
+	"x-ratelimit-limit":       {},
+	"x-ratelimit-remaining":   {},
+	"x-ratelimit-reset":       {},
+	"x-ratelimit-used":        {},
+	"x-mbx-used-remain-limit": {},
+	"retry-after":             {},
 }
 
 // collectRateLimitHeaders extracts the rate-limit metadata that Bitget

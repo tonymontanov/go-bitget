@@ -89,6 +89,13 @@ type RateLimitEvent struct {
 	//   X-RateLimit-Reset     (window reset timestamp)
 	//   Retry-After           (set on 429 responses)
 	//
+	// V3 (UTA, /api/v3/*) endpoints ship none of the above; their live
+	// quota signal is
+	//
+	//   X-Mbx-Used-Remain-Limit (remaining requests in the window)
+	//
+	// which is forwarded under that canonical key.
+	//
 	// May be empty for public endpoints that do not advertise per-UID
 	// limits. Always non-nil.
 	Headers map[string]string
