@@ -4,6 +4,17 @@ All notable changes to `github.com/tonymontanov/go-bitget/v2` are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased — connection liveness (2026-11-24)
+
+### Changed
+
+- **REST: HTTP/2 connection health check.** All requests to a host share one
+  HTTP/2 connection; when its flow stalled with the socket open (a proxy flow,
+  a dropped NAT entry) every request waited its timeout until the connection
+  died on its own — minutes. The transport now sends a PING after 5 s without
+  incoming frames and closes the connection if it is not answered within 3 s;
+  the next request dials a new one.
+
 ## v2.6.0 — 2026-09-24 (V3 / UTA WebSocket + desk-connector gaps)
 
 The V3 UTA profile is usable by a trading connector end to end — public and
