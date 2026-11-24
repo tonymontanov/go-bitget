@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **REST: HTTP/2 connection health check.** All requests to a host share one
   HTTP/2 connection; when its flow stalled with the socket open (a proxy flow,
   a dropped NAT entry) every request waited its timeout until the connection
-  died on its own — minutes. The transport now sends a PING after 5 s without
-  incoming frames and closes the connection if it is not answered within 3 s;
-  the next request dials a new one.
+  died on its own — minutes. The transport now sends a PING after 1 s without
+  incoming frames and closes the connection if it is not answered within 2 s;
+  the next request dials a new one, so a request caught on a stalled
+  connection fails within ~3 s.
 
 ## v2.6.0 — 2026-09-24 (V3 / UTA WebSocket + desk-connector gaps)
 
